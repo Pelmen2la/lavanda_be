@@ -57,6 +57,7 @@ func TestIntegration(t *testing.T) {
 	}
 	t.Setenv("ADMIN_EMAIL", "admin@example.test")
 	t.Setenv("ADMIN_PASSWORD", "test-only-password")
+	t.Setenv("ADMIN_LOGIN", "Initial.Admin")
 	t.Setenv("SMTP_HOST", "")
 	t.Setenv("TELEGRAM_BOT_TOKEN", "")
 	if err = a.CreateAdmin(ctx); err != nil {
@@ -88,6 +89,15 @@ func TestIntegration(t *testing.T) {
 	}
 	login := request("POST", "/api/auth/login", map[string]string{"email": "admin@example.test", "password": "test-only-password"}, nil)
 	expect(login, 200)
+	expect(request("POST", "/api/auth/login", map[string]string{"login": " INITIAL.ADMIN ", "password": "test-only-password"}, nil), 200)
+	t.Setenv("ADMIN_LOGIN", "Lavanda.Admin")
+	if err := a.SetAdminLogin(ctx); err != nil {
+		t.Fatal(err)
+	}
+	expect(request("POST", "/api/auth/login", map[string]string{"email": " LAVANDA.ADMIN ", "password": "test-only-password"}, nil), 200)
+	expect(request("POST", "/api/auth/login", map[string]string{"login": "initial.admin", "password": "test-only-password"}, nil), 401)
+	expect(request("POST", "/api/auth/login", map[string]string{"login": "lavanda.admin", "password": "incorrect-password"}, nil), 401)
+	expect(request("POST", "/api/auth/login", map[string]string{"login": "", "password": "test-only-password"}, nil), 401)
 	admin := login.Result().Cookies()[0]
 	var adminUser User
 	json.Unmarshal(request("GET", "/api/auth/me", nil, admin).Body.Bytes(), &adminUser)
@@ -299,6 +309,35 @@ func TestIntegration(t *testing.T) {
 	expect(request("POST", "/api/bookings", assignedBody, admin), 400)
 	availability := request("GET", "/api/availability?date="+start.Format("2006-01-02"), nil, nil)
 	expect(availability, 200)
+	detailPath := fmt.Sprintf("/api/admin/clients/%d", client.ID)
+	detailResponse := request("GET", detailPath, nil, admin)
+	expect(detailResponse, 200)
+	var detail struct {
+		Client   Client    `json:"client"`
+		Bookings []Booking `json:"bookings"`
+	}
+	if err := json.Unmarshal(detailResponse.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Client.ID != client.ID || len(detail.Bookings) != 2 || detail.Client.CreatedAt.IsZero() {
+		t.Fatal("incomplete client profile")
+	}
+	expect(request("GET", detailPath, nil, user), 403)
+	expect(request("GET", detailPath, nil, nil), 401)
+	expect(request("GET", "/api/admin/clients/999999999", nil, admin), 404)
+	rangePath := "/api/admin/bookings?from=" + start.AddDate(0, 0, -1).Format("2006-01-02") + "&to=" + start.Format("2006-01-02")
+	rangeResponse := request("GET", rangePath, nil, admin)
+	expect(rangeResponse, 200)
+	var rangeBookings []Booking
+	if err := json.Unmarshal(rangeResponse.Body.Bytes(), &rangeBookings); err != nil {
+		t.Fatal(err)
+	}
+	if len(rangeBookings) != 2 {
+		t.Fatal("range must include both bookings on its last day", len(rangeBookings))
+	}
+	expect(request("GET", "/api/admin/bookings?from=2026-10-20&to=2026-10-19", nil, admin), 400)
+	expect(request("GET", "/api/admin/bookings?from=invalid&to=2026-10-19", nil, admin), 400)
+	expect(request("GET", rangePath, nil, user), 403)
 	for _, viewer := range []struct {
 		cookie *http.Cookie
 		own    bool
@@ -480,6 +519,9 @@ func TestIntegration(t *testing.T) {
 	expect(request("POST", "/api/auth/login", map[string]string{"email": "admin@example.test", "password": "test-only-password"}, nil), 401)
 	expect(request("POST", "/api/auth/login", map[string]string{"email": "admin@example.test", "password": "new-admin-password"}, nil), 200)
 	t.Setenv("ADMIN_EMAIL", "client@example.test")
+	if err := a.SetAdminLogin(ctx); err == nil {
+		t.Fatal("must not assign admin login to a client")
+	}
 	if err := a.ResetAdminPassword(ctx); err == nil {
 		t.Fatal("must not reset a non-admin")
 	}

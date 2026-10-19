@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/mail"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -32,7 +33,45 @@ func passwordHash(value string) (string, error) {
 	b, err := bcrypt.GenerateFromPassword([]byte(value), 12)
 	return string(b), err
 }
+
+var adminLoginPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{2,31}$`)
+
+func normalizeAdminLogin(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if !adminLoginPattern.MatchString(value) {
+		return "", fmt.Errorf("Логин: от 3 до 32 символов, латинские буквы, цифры, точка, дефис и подчёркивание; первый символ — буква или цифра")
+	}
+	return value, nil
+}
+
+func (a *App) SetAdminLogin(ctx context.Context) error {
+	email, err := normalizeEmail(os.Getenv("ADMIN_EMAIL"))
+	if err != nil {
+		return err
+	}
+	login, err := normalizeAdminLogin(os.Getenv("ADMIN_LOGIN"))
+	if err != nil {
+		return err
+	}
+	result, err := a.DB.Exec(ctx, `UPDATE accounts a SET admin_login=$1 FROM clients c WHERE c.id=a.client_id AND c.email=$2 AND c.deleted_at IS NULL AND a.role='admin'`, login, email)
+	if err != nil {
+		return fmt.Errorf("не удалось задать логин: проверьте, не занят ли он другим администратором, и применены ли миграции")
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("администратор с таким email не найден")
+	}
+	return nil
+}
+
 func (a *App) CreateAdmin(ctx context.Context) error {
+	var login *string
+	if value := strings.TrimSpace(os.Getenv("ADMIN_LOGIN")); value != "" {
+		normalized, err := normalizeAdminLogin(value)
+		if err != nil {
+			return err
+		}
+		login = &normalized
+	}
 	email, err := normalizeEmail(os.Getenv("ADMIN_EMAIL"))
 	if err != nil {
 		return err
@@ -54,7 +93,7 @@ func (a *App) CreateAdmin(ctx context.Context) error {
 	if err = tx.QueryRow(ctx, "INSERT INTO clients(name,email,role) VALUES($1,$2,'admin') RETURNING id", name, email).Scan(&id); err != nil {
 		return fmt.Errorf("не удалось создать администратора: проверьте, нет ли уже такого email")
 	}
-	if _, err = tx.Exec(ctx, "INSERT INTO accounts(client_id,password_hash,role) VALUES($1,$2,'admin')", id, password); err != nil {
+	if _, err = tx.Exec(ctx, "INSERT INTO accounts(client_id,password_hash,role,admin_login) VALUES($1,$2,'admin',$3)", id, password, login); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -104,16 +143,20 @@ func (a *App) setSession(w http.ResponseWriter, r *http.Request, id int64) error
 }
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	var body struct {
+		Login    string `json:"login"`
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
-	email, _ := normalizeEmail(body.Email)
+	identifier := strings.ToLower(strings.TrimSpace(body.Login))
+	if identifier == "" {
+		identifier = strings.ToLower(strings.TrimSpace(body.Email))
+	}
 	var id int64
 	var password string
-	err := a.DB.QueryRow(r.Context(), "SELECT a.id,a.password_hash FROM accounts a JOIN clients c ON c.id=a.client_id WHERE c.email=$1 AND c.deleted_at IS NULL", email).Scan(&id, &password)
+	err := a.DB.QueryRow(r.Context(), "SELECT a.id,a.password_hash FROM accounts a JOIN clients c ON c.id=a.client_id WHERE $1<>'' AND (c.email=$1 OR (a.role='admin' AND a.admin_login=$1)) AND c.deleted_at IS NULL", identifier).Scan(&id, &password)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		dbError(w, err)
 		return
@@ -124,7 +167,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	}
 	valid := bcrypt.CompareHashAndPassword([]byte(password), []byte(body.Password)) == nil
 	if !valid || id == 0 {
-		fail(w, 401, "Неверный email или пароль")
+		fail(w, 401, "Неверный email, логин или пароль")
 		return
 	}
 	if err = a.setSession(w, r, id); err != nil {

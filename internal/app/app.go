@@ -147,6 +147,16 @@ INSERT INTO schema_migrations(version) VALUES(7)`); err != nil {
 			return err
 		}
 	}
+	if err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=8)").Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		if _, err = tx.Exec(ctx, `ALTER TABLE accounts ADD COLUMN admin_login text UNIQUE;
+ALTER TABLE accounts ADD CHECK (admin_login IS NULL OR (role='admin' AND admin_login ~ '^[a-z0-9][a-z0-9_.-]{2,31}$'));
+INSERT INTO schema_migrations(version) VALUES(8)`); err != nil {
+			return err
+		}
+	}
 	return tx.Commit(ctx)
 }
 func hash(s string) string { v := sha256.Sum256([]byte(s)); return hex.EncodeToString(v[:]) }
@@ -277,6 +287,7 @@ func (a *App) Handler() http.Handler {
 	m.HandleFunc("POST /api/bookings", a.protect(a.createBooking, false))
 	m.HandleFunc("POST /api/bookings/{id}/cancel", a.protect(a.cancelBooking, false))
 	m.HandleFunc("GET /api/admin/clients", a.protect(a.clients, true))
+	m.HandleFunc("GET /api/admin/clients/{id}", a.protect(a.clientDetail, true))
 	m.HandleFunc("POST /api/admin/clients", a.protect(a.saveClient, true))
 	m.HandleFunc("PUT /api/admin/clients/{id}", a.protect(a.saveClient, true))
 	m.HandleFunc("DELETE /api/admin/clients/{id}", a.protect(a.deleteClient, true))

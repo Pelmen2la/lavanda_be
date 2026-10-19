@@ -81,17 +81,29 @@ func (a *App) availability(w http.ResponseWriter, r *http.Request) {
 func (a *App) bookings(w http.ResponseWriter, r *http.Request) {
 	u := current(r)
 	admin := strings.HasPrefix(r.URL.Path, "/api/admin/") && u.Role == "admin"
-	// Admin calendar is bounded by a day; clients see their own complete history.
+	// Admin ranges include both dates in Moscow time; legacy date selects one day.
 	date := time.Now().In(Moscow)
+	until := date.AddDate(0, 0, 1)
 	var err error
 	if admin {
-		date, err = time.ParseInLocation("2006-01-02", r.URL.Query().Get("date"), Moscow)
+		from, to := r.URL.Query().Get("from"), r.URL.Query().Get("to")
+		if from == "" && to == "" {
+			from = r.URL.Query().Get("date")
+			to = from
+		}
+		date, err = time.ParseInLocation("2006-01-02", from, Moscow)
 		if err != nil {
-			fail(w, 400, "Укажите дату")
+			fail(w, 400, "Укажите дату начала диапазона")
 			return
 		}
+		last, parseErr := time.ParseInLocation("2006-01-02", to, Moscow)
+		if parseErr != nil || last.Before(date) {
+			fail(w, 400, "Укажите дату окончания не раньше даты начала")
+			return
+		}
+		until = last.AddDate(0, 0, 1)
 	}
-	rows, err := a.DB.Query(r.Context(), `SELECT b.id,b.workplace_id,p.name,b.client_id,c.name,b.starts_at,b.ends_at,b.hourly_price,b.cancelled_at,b.master_id,COALESCE(m.name,'') FROM bookings b JOIN workplaces p ON p.id=b.workplace_id JOIN clients c ON c.id=b.client_id LEFT JOIN clients m ON m.id=b.master_id WHERE (($1 AND b.starts_at >= $3 AND b.starts_at < $4) OR (NOT $1 AND (($5 <> 'master' AND b.client_id=$2) OR ($5='master' AND (b.master_id=$2 OR (b.master_id IS NULL AND EXISTS(SELECT 1 FROM master_workplaces mw WHERE mw.client_id=$2 AND mw.workplace_id=b.workplace_id))))))) ORDER BY b.starts_at DESC`, admin, u.ClientID, date, date.AddDate(0, 0, 1), u.Role)
+	rows, err := a.DB.Query(r.Context(), `SELECT b.id,b.workplace_id,p.name,b.client_id,c.name,b.starts_at,b.ends_at,b.hourly_price,b.cancelled_at,b.master_id,COALESCE(m.name,'') FROM bookings b JOIN workplaces p ON p.id=b.workplace_id JOIN clients c ON c.id=b.client_id LEFT JOIN clients m ON m.id=b.master_id WHERE (($1 AND b.starts_at >= $3 AND b.starts_at < $4) OR (NOT $1 AND (($5 <> 'master' AND b.client_id=$2) OR ($5='master' AND (b.master_id=$2 OR (b.master_id IS NULL AND EXISTS(SELECT 1 FROM master_workplaces mw WHERE mw.client_id=$2 AND mw.workplace_id=b.workplace_id))))))) ORDER BY b.starts_at DESC`, admin, u.ClientID, date, until, u.Role)
 	if err != nil {
 		dbError(w, err)
 		return

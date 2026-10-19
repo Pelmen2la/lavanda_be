@@ -1,0 +1,22 @@
+[Unit]
+Description=Lavanda booking API
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=lavanda
+Group=lavanda
+WorkingDirectory=/opt/lavanda
+EnvironmentFile=/etc/lavanda.env
+ExecStart=/opt/lavanda/lavanda-api serve
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

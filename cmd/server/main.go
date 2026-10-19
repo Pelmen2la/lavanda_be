@@ -46,9 +46,15 @@ func main() {
 		}
 		log.Print("Administrator password updated; previous sessions revoked")
 		return
+	case "admin-set-login":
+		if err = a.SetAdminLogin(ctx); err != nil {
+			log.Fatal(err)
+		}
+		log.Print("Administrator login updated")
+		return
 	case "serve":
 	default:
-		log.Fatal("Usage: server [serve|migrate|admin|admin-reset-password]")
+		log.Fatal("Usage: server [serve|migrate|admin|admin-reset-password|admin-set-login]")
 	}
 	server := &http.Server{Addr: config.ListenAddr, Handler: a.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 25 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

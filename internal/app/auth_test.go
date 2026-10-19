@@ -22,3 +22,14 @@ func TestPasswordLength(t *testing.T) {
 		}
 	}
 }
+
+func TestAdminLogin(t *testing.T) {
+	for _, value := range []string{"", "ab", "admin@example.ru", "админ", "admin name", "-admin", strings.Repeat("a", 33)} {
+		if _, err := normalizeAdminLogin(value); err == nil {
+			t.Fatalf("invalid login accepted: %q", value)
+		}
+	}
+	if login, err := normalizeAdminLogin(" Lavanda.Admin-1_test "); err != nil || login != "lavanda.admin-1_test" {
+		t.Fatal("login normalization failed", err)
+	}
+}
