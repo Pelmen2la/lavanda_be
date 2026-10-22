@@ -33,3 +33,16 @@ func TestAdminLogin(t *testing.T) {
 		t.Fatal("login normalization failed", err)
 	}
 }
+
+func TestNormalizePhone(t *testing.T) {
+	for _, value := range []string{"+7 (999) 123-45-67", "89991234567", "9991234567", " +79991234567 "} {
+		if got, err := normalizePhone(value); err != nil || got != "+79991234567" {
+			t.Fatalf("normalize %q: %q %v", value, got, err)
+		}
+	}
+	for _, value := range []string{"", "123", "+19991234567", "phone79991234567", "799912345678"} {
+		if _, err := normalizePhone(value); err == nil {
+			t.Fatalf("accepted invalid phone %q", value)
+		}
+	}
+}

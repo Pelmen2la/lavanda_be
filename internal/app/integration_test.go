@@ -110,7 +110,7 @@ func TestIntegration(t *testing.T) {
 			ID int64 `json:"id"`
 		}
 		json.Unmarshal(created.Body.Bytes(), &noEmail)
-		expect(request("POST", fmt.Sprintf("/api/admin/clients/%d/invite", noEmail.ID), map[string]string{}, admin), 409)
+		expect(request("POST", fmt.Sprintf("/api/admin/clients/%d/invite", noEmail.ID), map[string]string{}, admin), 201)
 		expect(request("PUT", fmt.Sprintf("/api/admin/clients/%d", noEmail.ID), map[string]string{"name": name, "email": " "}, admin), 200)
 		deletePath := fmt.Sprintf("/api/admin/clients/%d", noEmail.ID)
 		expect(request("DELETE", deletePath, nil, nil), 401)
@@ -177,15 +177,15 @@ func TestIntegration(t *testing.T) {
 		t.Fatal("renewal did not rotate token")
 	}
 	oldToken := strings.Split(inv.URL, "#token=")[1]
-	expect(request("POST", "/api/auth/register", map[string]string{"token": oldToken, "password": "client-password"}, nil), 400)
+	expect(request("POST", "/api/auth/register", map[string]string{"token": oldToken, "password": "client-password", "confirmPassword": "client-password", "name": "Test Client", "phone": "+79991234567"}, nil), 400)
 	inviteToken := strings.Split(current.URL, "#token=")[1]
-	registered := request("POST", "/api/auth/register", map[string]string{"token": inviteToken, "password": "client-password"}, nil)
+	registered := request("POST", "/api/auth/register", map[string]string{"token": inviteToken, "password": "client-password", "confirmPassword": "client-password", "name": "Test Client", "phone": "+79991234567"}, nil)
 	expect(registered, 201)
 	user := registered.Result().Cookies()[0]
 	expect(request("GET", invitePath, nil, admin), 404)
 	expect(request("POST", invitePath+"/send", nil, admin), 404)
 	expect(request("GET", invitePath, nil, user), 403)
-	expect(request("POST", "/api/auth/register", map[string]string{"token": inviteToken, "password": "client-password"}, nil), 400)
+	expect(request("POST", "/api/auth/register", map[string]string{"token": inviteToken, "password": "client-password", "confirmPassword": "client-password", "name": "Test Client", "phone": "+79991234567"}, nil), 400)
 	expect(request("GET", "/api/admin/clients", nil, user), 403)
 	me := request("GET", "/api/auth/me", nil, user)
 	expect(me, 200)
@@ -221,7 +221,7 @@ func TestIntegration(t *testing.T) {
 		return nil
 	}
 	expect(request("POST", masterPath+"/invite/send", nil, admin), 200)
-	masterRegistration := request("POST", "/api/auth/register", map[string]string{"token": strings.Split(masterInvitation.URL, "#token=")[1], "password": "master-password"}, nil)
+	masterRegistration := request("POST", "/api/auth/register", map[string]string{"token": strings.Split(masterInvitation.URL, "#token=")[1], "password": "master-password", "confirmPassword": "master-password", "name": "Master", "phone": "+79991234568"}, nil)
 	expect(masterRegistration, 201)
 	masterCookie := masterRegistration.Result().Cookies()[0]
 	var masterUser User
@@ -525,4 +525,74 @@ func TestIntegration(t *testing.T) {
 	if err := a.ResetAdminPassword(ctx); err == nil {
 		t.Fatal("must not reset a non-admin")
 	}
+	// Exercise public registration separately from the previous rate-limit window.
+	a.attempts = map[string]bucket{}
+	signup := map[string]string{"name": "Public Client", "phone": "8 (999) 222-33-44", "password": "public-password", "confirmPassword": "public-password"}
+	createdPublic := request("POST", "/api/auth/register", signup, nil)
+	expect(createdPublic, 201)
+	publicCookie := createdPublic.Result().Cookies()[0]
+	expect(request("GET", "/api/auth/me", nil, publicCookie), 200)
+	expect(request("GET", "/api/admin/clients", nil, publicCookie), 403)
+	for _, number := range []string{"+79992223344", "89992223344", "9992223344"} {
+		expect(request("POST", "/api/auth/login", map[string]string{"phone": number, "password": "public-password"}, nil), 200)
+	}
+	signup["phone"] = "+79992223344"
+	expect(request("POST", "/api/auth/register", signup, nil), 409)
+	signup["phone"] = "+79992223345"
+	signup["confirmPassword"] = "mismatch"
+	expect(request("POST", "/api/auth/register", signup, nil), 400)
+	// Invalid recovery addresses must not match accounts with an empty email.
+	a.attempts = map[string]bucket{}
+	var resetsBefore, resetsAfter int
+	if err := db.QueryRow(ctx, "SELECT count(*) FROM password_resets").Scan(&resetsBefore); err != nil {
+		t.Fatal(err)
+	}
+	expect(request("POST", "/api/auth/forgot", map[string]string{"email": ""}, nil), 200)
+	expect(request("POST", "/api/auth/forgot", map[string]string{"email": "invalid"}, nil), 200)
+	if err := db.QueryRow(ctx, "SELECT count(*) FROM password_resets").Scan(&resetsAfter); err != nil || resetsAfter != resetsBefore {
+		t.Fatal("invalid email created reset token", err)
+	}
+	// Concurrent requests cannot create two accounts with the same phone.
+	concurrentSignup := map[string]string{"name": "Concurrent", "phone": "+79995556677", "password": "concurrent-password", "confirmPassword": "concurrent-password"}
+	statuses := make(chan int, 2)
+	for i := 0; i < 2; i++ {
+		go func() { statuses <- request("POST", "/api/auth/register", concurrentSignup, nil).Code }()
+	}
+	first, second := <-statuses, <-statuses
+	if !((first == 201 && second == 409) || (first == 409 && second == 201)) {
+		t.Fatalf("concurrent signup statuses: %d %d", first, second)
+	}
+	signup["confirmPassword"] = signup["password"]
+	signup["email"] = "invalid"
+	expect(request("POST", "/api/auth/register", signup, nil), 400)
+	delete(signup, "email")
+	for _, field := range []string{"name", "phone", "password", "confirmPassword"} {
+		value := signup[field]
+		delete(signup, field)
+		expect(request("POST", "/api/auth/register", signup, nil), 400)
+		signup[field] = value
+	}
+	newAdmin := request("POST", "/api/auth/login", map[string]string{"login": "lavanda.admin", "password": "new-admin-password"}, nil).Result().Cookies()[0]
+	card := request("POST", "/api/admin/clients", map[string]string{"name": "Invited without email", "phone": "+79992223345"}, newAdmin)
+	expect(card, 200)
+	var cardID struct{ ID int64 }
+	json.Unmarshal(card.Body.Bytes(), &cardID)
+	// A phone match must never grant access to an existing card.
+	expect(request("POST", "/api/auth/register", signup, nil), 409)
+	path := fmt.Sprintf("/api/admin/clients/%d/invite", cardID.ID)
+	link := request("POST", path, map[string]string{}, newAdmin)
+	expect(link, 201)
+	var emailLessInvitation Invitation
+	json.Unmarshal(link.Body.Bytes(), &emailLessInvitation)
+	expect(request("POST", path+"/send", nil, newAdmin), 409)
+	signup["token"] = strings.Split(emailLessInvitation.URL, "#token=")[1]
+	joined := request("POST", "/api/auth/register", signup, nil)
+	expect(joined, 201)
+	var joinedUser User
+	json.Unmarshal(request("GET", "/api/auth/me", nil, joined.Result().Cookies()[0]).Body.Bytes(), &joinedUser)
+	if joinedUser.ClientID != cardID.ID || joinedUser.Email != "" {
+		t.Fatal("invitation did not preserve card without email")
+	}
+	expect(request("POST", "/api/auth/register", signup, nil), 400)
+
 }

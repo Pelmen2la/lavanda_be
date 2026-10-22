@@ -23,6 +23,28 @@ func normalizeEmail(value string) (string, error) {
 	}
 	return value, nil
 }
+
+func normalizePhone(value string) (string, error) {
+	var digits strings.Builder
+	for _, c := range strings.TrimSpace(value) {
+		if c >= '0' && c <= '9' {
+			digits.WriteRune(c)
+		} else if !strings.ContainsRune("+()- \t", c) {
+			return "", fmt.Errorf("Укажите корректный телефон")
+		}
+	}
+	s := digits.String()
+	if len(s) == 10 {
+		s = "7" + s
+	}
+	if len(s) == 11 && s[0] == '8' {
+		s = "7" + s[1:]
+	}
+	if len(s) != 11 || s[0] != '7' {
+		return "", fmt.Errorf("Укажите полный телефон: +7 (999) 123-45-67")
+	}
+	return "+" + s, nil
+}
 func passwordHash(value string) (string, error) {
 	if utf8.RuneCountInString(value) < 8 {
 		return "", fmt.Errorf("Пароль должен содержать не менее 8 символов")
@@ -144,6 +166,7 @@ func (a *App) setSession(w http.ResponseWriter, r *http.Request, id int64) error
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Login    string `json:"login"`
+		Phone    string `json:"phone"`
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
@@ -154,9 +177,13 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	if identifier == "" {
 		identifier = strings.ToLower(strings.TrimSpace(body.Email))
 	}
+	if body.Phone != "" {
+		identifier = body.Phone
+	}
+	phone, _ := normalizePhone(identifier)
 	var id int64
 	var password string
-	err := a.DB.QueryRow(r.Context(), "SELECT a.id,a.password_hash FROM accounts a JOIN clients c ON c.id=a.client_id WHERE $1<>'' AND (c.email=$1 OR (a.role='admin' AND a.admin_login=$1)) AND c.deleted_at IS NULL", identifier).Scan(&id, &password)
+	err := a.DB.QueryRow(r.Context(), "SELECT a.id,a.password_hash FROM accounts a JOIN clients c ON c.id=a.client_id WHERE $1<>'' AND (c.email=$1 OR ($2<>'' AND c.phone=$2) OR (a.role='admin' AND a.admin_login=$1)) AND c.deleted_at IS NULL", identifier, phone).Scan(&id, &password)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		dbError(w, err)
 		return
@@ -167,7 +194,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	}
 	valid := bcrypt.CompareHashAndPassword([]byte(password), []byte(body.Password)) == nil
 	if !valid || id == 0 {
-		fail(w, 401, "Неверный email, логин или пароль")
+		fail(w, 401, "Неверный телефон, email, логин или пароль")
 		return
 	}
 	if err = a.setSession(w, r, id); err != nil {
@@ -188,10 +215,36 @@ func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) register(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Token    string `json:"token"`
-		Password string `json:"password"`
+		Token           string `json:"token"`
+		Password        string `json:"password"`
+		ConfirmPassword string `json:"confirmPassword"`
+		Name            string `json:"name"`
+		Phone           string `json:"phone"`
+		Email           string `json:"email"`
 	}
 	if !decode(w, r, &body) {
+		return
+	}
+	body.Name = strings.TrimSpace(body.Name)
+	if body.Name == "" || len(body.Name) > 200 {
+		fail(w, 400, "Укажите имя или сократите слишком длинное имя")
+		return
+	}
+	phone, err := normalizePhone(body.Phone)
+	if err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	email := strings.TrimSpace(body.Email)
+	if email != "" {
+		email, err = normalizeEmail(email)
+		if err != nil {
+			fail(w, 400, err.Error())
+			return
+		}
+	}
+	if body.Password != body.ConfirmPassword {
+		fail(w, 400, "Пароли не совпадают")
 		return
 	}
 	password, err := passwordHash(body.Password)
@@ -206,7 +259,14 @@ func (a *App) register(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	var clientID, id int64
-	err = tx.QueryRow(r.Context(), "UPDATE invitations SET used_at=now() WHERE token_hash=$1 AND used_at IS NULL AND expires_at>now() AND EXISTS(SELECT 1 FROM clients WHERE id=client_id AND deleted_at IS NULL AND email <> '') RETURNING client_id", hash(body.Token)).Scan(&clientID)
+	if body.Token == "" {
+		err = tx.QueryRow(r.Context(), "INSERT INTO clients(name,phone,email) VALUES($1,$2,$3) RETURNING id", body.Name, phone, email).Scan(&clientID)
+	} else {
+		err = tx.QueryRow(r.Context(), "SELECT c.id FROM invitations i JOIN clients c ON c.id=i.client_id WHERE i.token_hash=$1 AND i.used_at IS NULL AND i.expires_at>now() AND c.deleted_at IS NULL AND c.role IN ('client','master') AND NOT EXISTS(SELECT 1 FROM accounts WHERE client_id=c.id) FOR UPDATE OF c,i", hash(body.Token)).Scan(&clientID)
+		if err == nil {
+			_, err = tx.Exec(r.Context(), "UPDATE clients SET name=$2,phone=$3,email=COALESCE(NULLIF($4,''),email) WHERE id=$1", clientID, body.Name, phone, email)
+		}
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		fail(w, 400, "Приглашение недействительно или истекло")
 		return
@@ -230,7 +290,7 @@ func (a *App) register(w http.ResponseWriter, r *http.Request) {
 	}
 	// Registration remains successful even if creating the first session fails; login can be retried.
 	if err = a.setSession(w, r, id); err != nil {
-		fail(w, 500, "Аккаунт создан. Войдите с вашим email и паролем.")
+		fail(w, 500, "Аккаунт создан. Войдите с вашим телефоном и паролем.")
 		return
 	}
 	writeJSON(w, 201, map[string]bool{"ok": true})
@@ -244,7 +304,7 @@ func (a *App) forgot(w http.ResponseWriter, r *http.Request) {
 	}
 	email, _ := normalizeEmail(body.Email)
 	var id int64
-	err := a.DB.QueryRow(r.Context(), "SELECT a.id FROM accounts a JOIN clients c ON c.id=a.client_id WHERE c.email=$1 AND c.deleted_at IS NULL", email).Scan(&id)
+	err := a.DB.QueryRow(r.Context(), "SELECT a.id FROM accounts a JOIN clients c ON c.id=a.client_id WHERE $1<>'' AND c.email=$1 AND c.deleted_at IS NULL", email).Scan(&id)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		dbError(w, err)
 		return

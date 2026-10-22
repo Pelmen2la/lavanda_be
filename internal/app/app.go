@@ -157,6 +157,20 @@ INSERT INTO schema_migrations(version) VALUES(8)`); err != nil {
 			return err
 		}
 	}
+	if err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=9)").Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		// Normalize existing Russian numbers before enforcing unique login identifiers.
+		if _, err = tx.Exec(ctx, `UPDATE clients SET phone=CASE
+ WHEN length(regexp_replace(phone,'[^0-9]','','g'))=10 THEN '+7'||regexp_replace(phone,'[^0-9]','','g')
+ WHEN regexp_replace(phone,'[^0-9]','','g') ~ '^[78][0-9]{10}$' THEN '+7'||substring(regexp_replace(phone,'[^0-9]','','g') from 2)
+ ELSE phone END;
+CREATE UNIQUE INDEX clients_phone_nonempty_key ON clients(phone) WHERE phone<>'' AND deleted_at IS NULL;
+INSERT INTO schema_migrations(version) VALUES(9)`); err != nil {
+			return fmt.Errorf("миграция телефонов: проверьте повторяющиеся номера в активных карточках клиентов: %w", err)
+		}
+	}
 	return tx.Commit(ctx)
 }
 func hash(s string) string { v := sha256.Sum256([]byte(s)); return hex.EncodeToString(v[:]) }
@@ -197,6 +211,10 @@ func dbError(w http.ResponseWriter, err error) {
 			fail(w, 409, "Это время уже занято. Обновите расписание.")
 			return
 		case "23505":
+			if p.ConstraintName == "clients_phone_nonempty_key" {
+				fail(w, 409, "Этот телефон уже есть в системе. Войдите или обратитесь к администратору за приглашением.")
+				return
+			}
 			if p.ConstraintName == "clients_email_nonempty_key" || p.ConstraintName == "clients_email_key" {
 				fail(w, 409, "Этот email уже занят другим пользователем")
 				return

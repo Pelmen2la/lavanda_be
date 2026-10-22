@@ -76,6 +76,15 @@ func (a *App) saveClient(w http.ResponseWriter, r *http.Request) {
 	}
 	email := strings.TrimSpace(c.Email)
 	var err error
+	if strings.TrimSpace(c.Phone) != "" {
+		c.Phone, err = normalizePhone(c.Phone)
+		if err != nil {
+			fail(w, 400, err.Error())
+			return
+		}
+	} else {
+		c.Phone = ""
+	}
 	if email != "" {
 		email, err = normalizeEmail(email)
 	}
@@ -97,8 +106,8 @@ func (a *App) saveClient(w http.ResponseWriter, r *http.Request) {
 		}
 		err = tx.QueryRow(r.Context(), "INSERT INTO clients(name,phone,email,note,role) VALUES($1,$2,$3,$4,$5) RETURNING id,role", c.Name, c.Phone, email, c.Note, c.Role).Scan(&id, &role)
 	} else {
-		// Registered email is an authentication identifier. Change it only through a future verified email-change flow.
-		err = tx.QueryRow(r.Context(), `UPDATE clients c SET name=$1,phone=$2,email=$3,note=$4,role=COALESCE(NULLIF($6,''),c.role) WHERE c.id=$5 AND c.deleted_at IS NULL AND (c.role<>'admin' OR $6='') AND (c.email=$3 OR NOT EXISTS(SELECT 1 FROM accounts a WHERE a.client_id=c.id)) RETURNING c.id,c.role`, c.Name, c.Phone, email, c.Note, r.PathValue("id"), c.Role).Scan(&id, &role)
+		// Existing login identifiers cannot be replaced through ordinary card editing.
+		err = tx.QueryRow(r.Context(), `UPDATE clients c SET name=$1,phone=CASE WHEN $2='' AND EXISTS(SELECT 1 FROM accounts WHERE client_id=c.id) THEN c.phone ELSE $2 END,email=$3,note=$4,role=COALESCE(NULLIF($6,''),c.role) WHERE c.id=$5 AND c.deleted_at IS NULL AND (c.role<>'admin' OR $6='') AND ((c.email=$3 AND (c.phone=$2 OR c.phone='' OR $2='')) OR NOT EXISTS(SELECT 1 FROM accounts a WHERE a.client_id=c.id)) RETURNING c.id,c.role`, c.Name, c.Phone, email, c.Note, r.PathValue("id"), c.Role).Scan(&id, &role)
 	}
 	if err != nil {
 		dbError(w, err)
@@ -163,14 +172,9 @@ func (a *App) invite(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	var id int64
-	var email string
-	err = tx.QueryRow(r.Context(), "SELECT id,email FROM clients WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", r.PathValue("id")).Scan(&id, &email)
+	err = tx.QueryRow(r.Context(), "SELECT id FROM clients WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", r.PathValue("id")).Scan(&id)
 	if err != nil {
 		dbError(w, err)
-		return
-	}
-	if email == "" {
-		fail(w, 409, "Для приглашения добавьте email в карточку клиента")
 		return
 	}
 	var registered bool
