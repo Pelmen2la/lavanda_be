@@ -99,6 +99,10 @@ func (a *App) saveClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if _, err = tx.Exec(r.Context(), "SELECT pg_advisory_xact_lock(78123457)"); err != nil {
+		dbError(w, err)
+		return
+	}
 	var role string
 	if r.Method == "POST" {
 		if c.Role == "" {
@@ -171,6 +175,10 @@ func (a *App) invite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if _, err = tx.Exec(r.Context(), "SELECT pg_advisory_xact_lock(78123457)"); err != nil {
+		dbError(w, err)
+		return
+	}
 	var id int64
 	err = tx.QueryRow(r.Context(), "SELECT id FROM clients WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", r.PathValue("id")).Scan(&id)
 	if err != nil {
@@ -205,17 +213,19 @@ func (a *App) invite(w http.ResponseWriter, r *http.Request) {
 }
 
 type Workplace struct {
-	ID              int64  `json:"id"`
-	Name            string `json:"name"`
-	Description     string `json:"description"`
-	HourlyPrice     int    `json:"hourlyPrice"`
-	Active          bool   `json:"active"`
-	BlockedWeekdays []int  `json:"blockedWeekdays"`
+	ID              int64   `json:"id"`
+	Name            string  `json:"name"`
+	Description     string  `json:"description"`
+	HourlyPrice     int     `json:"hourlyPrice"`
+	Active          bool    `json:"active"`
+	BlockedWeekdays []int   `json:"blockedWeekdays"`
+	LinkedPlaceIDs  []int64 `json:"linkedPlaceIds"`
+	ResourceIDs     []int64 `json:"resourceIds"`
 }
 
 func (a *App) workplaces(w http.ResponseWriter, r *http.Request) {
 	all := strings.HasPrefix(r.URL.Path, "/api/admin/")
-	rows, err := a.DB.Query(r.Context(), "SELECT p.id,p.name,p.description,p.hourly_price,p.active,ARRAY(SELECT DISTINCT unnest(c.work_days) FROM master_workplaces mw JOIN clients c ON c.id=mw.client_id WHERE mw.workplace_id=p.id AND c.role='master' AND c.deleted_at IS NULL AND c.reserve_workdays) FROM workplaces p WHERE p.deleted_at IS NULL AND (p.active OR $1) ORDER BY p.id", all)
+	rows, err := a.DB.Query(r.Context(), "SELECT p.id,p.name,p.description,p.hourly_price,p.active,ARRAY(SELECT DISTINCT unnest(c.work_days) FROM master_workplaces mw JOIN clients c ON c.id=mw.client_id WHERE EXISTS(SELECT 1 FROM workplace_resources target JOIN workplace_resources source ON source.resource_id=target.resource_id WHERE target.workplace_id=p.id AND source.workplace_id=mw.workplace_id) AND c.role='master' AND c.deleted_at IS NULL AND c.reserve_workdays),ARRAY(SELECT linked_id FROM workplace_links WHERE workplace_id=p.id ORDER BY linked_id),ARRAY(SELECT resource_id FROM workplace_resources WHERE workplace_id=p.id ORDER BY resource_id) FROM workplaces p WHERE p.deleted_at IS NULL AND (p.active OR $1) ORDER BY p.id", all)
 	if err != nil {
 		dbError(w, err)
 		return
@@ -224,7 +234,7 @@ func (a *App) workplaces(w http.ResponseWriter, r *http.Request) {
 	items := []Workplace{}
 	for rows.Next() {
 		var p Workplace
-		if err = rows.Scan(&p.ID, &p.Name, &p.Description, &p.HourlyPrice, &p.Active, &p.BlockedWeekdays); err != nil {
+		if err = rows.Scan(&p.ID, &p.Name, &p.Description, &p.HourlyPrice, &p.Active, &p.BlockedWeekdays, &p.LinkedPlaceIDs, &p.ResourceIDs); err != nil {
 			dbError(w, err)
 			return
 		}
@@ -238,10 +248,11 @@ func (a *App) workplaces(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) saveWorkplace(w http.ResponseWriter, r *http.Request) {
 	var p struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		HourlyPrice int    `json:"hourlyPrice"`
-		Active      bool   `json:"active"`
+		Name           string   `json:"name"`
+		Description    string   `json:"description"`
+		HourlyPrice    int      `json:"hourlyPrice"`
+		Active         bool     `json:"active"`
+		LinkedPlaceIDs *[]int64 `json:"linkedPlaceIds"`
 	}
 	if !decode(w, r, &p) {
 		return
@@ -252,17 +263,81 @@ func (a *App) saveWorkplace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var id int64
-	var err error
+	tx, err := a.DB.Begin(r.Context())
+	if err != nil {
+		dbError(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if _, err = tx.Exec(r.Context(), "SELECT pg_advisory_xact_lock(78123457)"); err != nil {
+		dbError(w, err)
+		return
+	}
 	if r.Method == "POST" {
-		err = a.DB.QueryRow(r.Context(), "INSERT INTO workplaces(name,description,hourly_price,active) VALUES($1,$2,$3,$4) RETURNING id", p.Name, p.Description, p.HourlyPrice, p.Active).Scan(&id)
+		err = tx.QueryRow(r.Context(), "INSERT INTO workplaces(name,description,hourly_price,active) VALUES($1,$2,$3,$4) RETURNING id", p.Name, p.Description, p.HourlyPrice, p.Active).Scan(&id)
 	} else {
-		err = a.DB.QueryRow(r.Context(), "UPDATE workplaces SET name=$1,description=$2,hourly_price=$3,active=$4 WHERE id=$5 AND deleted_at IS NULL RETURNING id", p.Name, p.Description, p.HourlyPrice, p.Active, r.PathValue("id")).Scan(&id)
+		err = tx.QueryRow(r.Context(), "UPDATE workplaces SET name=$1,description=$2,hourly_price=$3,active=$4 WHERE id=$5 AND deleted_at IS NULL RETURNING id", p.Name, p.Description, p.HourlyPrice, p.Active, r.PathValue("id")).Scan(&id)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		fail(w, 404, "Место не найдено")
 		return
 	}
 	if err != nil {
+		dbError(w, err)
+		return
+	}
+	if p.LinkedPlaceIDs != nil {
+		ids := *p.LinkedPlaceIDs
+		if ids == nil {
+			ids = []int64{}
+		}
+		if len(ids) > 100 {
+			fail(w, 400, "Можно связать не более 100 мест")
+			return
+		}
+		seen := map[int64]bool{}
+		for _, linkedID := range ids {
+			if linkedID <= 0 || linkedID == id || seen[linkedID] {
+				fail(w, 400, "Выберите другие места без повторений")
+				return
+			}
+			seen[linkedID] = true
+		}
+		var changed bool
+		if err = tx.QueryRow(r.Context(), `SELECT ARRAY(SELECT linked_id FROM workplace_links WHERE workplace_id=$1 ORDER BY linked_id) <> ARRAY(SELECT unnest($2::bigint[]) ORDER BY 1)`, id, ids).Scan(&changed); err != nil {
+			dbError(w, err)
+			return
+		}
+		if changed {
+			var booked bool
+			if err = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM bookings WHERE workplace_id=$1 AND cancelled_at IS NULL AND ends_at>now())", id).Scan(&booked); err != nil {
+				dbError(w, err)
+				return
+			}
+			if booked {
+				fail(w, 409, "Нельзя менять состав места, пока на него есть текущие или будущие брони. Сначала отмените или перенесите их.")
+				return
+			}
+			var invalid bool
+			if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM unnest($2::bigint[]) selected(id) WHERE NOT EXISTS(SELECT 1 FROM workplaces p WHERE p.id=selected.id AND p.deleted_at IS NULL) OR EXISTS(SELECT 1 FROM workplace_links WHERE workplace_id=selected.id)) OR (cardinality($2::bigint[])>0 AND EXISTS(SELECT 1 FROM workplace_links WHERE linked_id=$1))`, id, ids).Scan(&invalid); err != nil {
+				dbError(w, err)
+				return
+			}
+			if invalid {
+				fail(w, 400, "Связывать можно только существующие отдельные места. Вложенные кабинеты не поддерживаются.")
+				return
+			}
+			if _, err = tx.Exec(r.Context(), "DELETE FROM workplace_links WHERE workplace_id=$1", id); err != nil {
+				dbError(w, err)
+				return
+			}
+			if _, err = tx.Exec(r.Context(), "INSERT INTO workplace_links(workplace_id,linked_id) SELECT $1,unnest($2::bigint[])", id, ids); err != nil {
+				dbError(w, err)
+				return
+			}
+		}
+	}
+	if err = tx.Commit(r.Context()); err != nil {
 		dbError(w, err)
 		return
 	}

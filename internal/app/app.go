@@ -25,6 +25,9 @@ import (
 //go:embed schema.sql
 var schema string
 
+//go:embed linked_places.sql
+var linkedPlacesSchema string
+
 var Moscow = time.FixedZone("MSK", 3*60*60)
 
 type App struct {
@@ -169,6 +172,17 @@ INSERT INTO schema_migrations(version) VALUES(8)`); err != nil {
 CREATE UNIQUE INDEX clients_phone_nonempty_key ON clients(phone) WHERE phone<>'' AND deleted_at IS NULL;
 INSERT INTO schema_migrations(version) VALUES(9)`); err != nil {
 			return fmt.Errorf("миграция телефонов: проверьте повторяющиеся номера в активных карточках клиентов: %w", err)
+		}
+	}
+	if err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=10)").Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		if _, err = tx.Exec(ctx, linkedPlacesSchema); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, "INSERT INTO schema_migrations(version) VALUES(10)"); err != nil {
+			return err
 		}
 	}
 	return tx.Commit(ctx)

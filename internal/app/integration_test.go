@@ -595,4 +595,185 @@ func TestIntegration(t *testing.T) {
 	}
 	expect(request("POST", "/api/auth/register", signup, nil), 400)
 
+	t.Run("linked workplace resources", func(t *testing.T) {
+		makePlace := func(name string, linked []int64) int64 {
+			response := request("POST", "/api/admin/workplaces", map[string]any{"name": name, "hourlyPrice": 123400, "active": true, "linkedPlaceIds": linked}, newAdmin)
+			expect(response, 200)
+			var item struct{ ID int64 }
+			json.Unmarshal(response.Body.Bytes(), &item)
+			return item.ID
+		}
+		chair := makePlace("Chair", []int64{})
+		couch := makePlace("Couch", []int64{})
+		spare := makePlace("Other room", []int64{})
+		room := makePlace("Whole room", []int64{chair, couch})
+		day := time.Now().In(Moscow).AddDate(0, 0, 2)
+		from := time.Date(day.Year(), day.Month(), day.Day(), 9, 0, 0, 0, Moscow)
+		to := from.Add(time.Hour)
+		book := func(place int64) *httptest.ResponseRecorder {
+			return request("POST", "/api/bookings", map[string]any{"workplaceId": place, "start": from, "end": to}, publicCookie)
+		}
+		bookingID := func(response *httptest.ResponseRecorder) int64 {
+			expect(response, 201)
+			var item struct{ ID int64 }
+			json.Unmarshal(response.Body.Bytes(), &item)
+			return item.ID
+		}
+		cancel := func(id int64) {
+			expect(request("POST", fmt.Sprintf("/api/bookings/%d/cancel", id), map[string]string{}, newAdmin), 200)
+		}
+		chairBooking := bookingID(book(chair))
+		couchBooking := bookingID(book(couch))
+		expect(book(room), 409)
+		conflict := request("POST", "/api/bookings", map[string]any{"workplaceId": room, "start": from, "end": to}, newAdmin)
+		expect(conflict, 409)
+		var conflictBody struct{ Conflicts []Booking }
+		json.Unmarshal(conflict.Body.Bytes(), &conflictBody)
+		if len(conflictBody.Conflicts) != 2 {
+			t.Fatal("room must report both independent conflicting bookings")
+		}
+		var slots []Busy
+		json.Unmarshal(request("GET", "/api/availability?date="+from.Format("2006-01-02"), nil, nil).Body.Bytes(), &slots)
+		seen := map[int64]bool{}
+		for _, slot := range slots {
+			seen[slot.WorkplaceID] = true
+		}
+		if !seen[chair] || !seen[couch] || !seen[room] || seen[spare] {
+			t.Fatal("wrong projected availability")
+		}
+		for _, viewer := range []*http.Cookie{nil, publicCookie} {
+			response := request("GET", "/api/availability?date="+from.Format("2006-01-02"), nil, viewer)
+			expect(response, 200)
+			var childSlots []Busy
+			json.Unmarshal(response.Body.Bytes(), &childSlots)
+			names := map[string]bool{}
+			for _, slot := range childSlots {
+				if (slot.WorkplaceID == room || slot.WorkplaceID == chair || slot.WorkplaceID == couch) && !slot.Booked {
+					t.Fatal("booking must be distinguishable from a master reservation")
+				}
+				if slot.WorkplaceID == room {
+					names[slot.BlockedByName] = true
+					if slot.Own {
+						t.Fatal("room blocked by child must not be an own booking")
+					}
+				}
+				if (slot.WorkplaceID == chair || slot.WorkplaceID == couch) && (slot.BlockedByName != "" || slot.Own != (viewer != nil)) {
+					t.Fatal("direct child booking lost ownership or was marked indirect")
+				}
+			}
+			if len(names) != 2 || !names["Chair"] || !names["Couch"] {
+				t.Fatal("room must identify both occupied children")
+			}
+		}
+		cancel(chairBooking)
+		cancel(couchBooking)
+		roomBooking := bookingID(book(room))
+		for _, viewer := range []*http.Cookie{nil, publicCookie} {
+			response := request("GET", "/api/availability?date="+from.Format("2006-01-02"), nil, viewer)
+			expect(response, 200)
+			var roomSlots []Busy
+			json.Unmarshal(response.Body.Bytes(), &roomSlots)
+			linkedSlots := 0
+			for _, slot := range roomSlots {
+				if slot.WorkplaceID == chair || slot.WorkplaceID == couch {
+					linkedSlots++
+					if slot.BlockedByName != "Whole room" {
+						t.Fatal("missing source room name in availability")
+					}
+					if slot.Own {
+						t.Fatal("child blocked by room must not be an own booking")
+					}
+				}
+				if slot.WorkplaceID == room && slot.BlockedByName != "" {
+					t.Fatal("direct booking marked as indirect")
+				}
+			}
+			if linkedSlots != 2 {
+				t.Fatal("expected one named blocked interval per child")
+			}
+			if strings.Contains(response.Body.String(), "Public Client") {
+				t.Fatal("availability exposed client name")
+			}
+		}
+		var price, resourceCount, recordCount int
+		if err := db.QueryRow(ctx, "SELECT hourly_price,(SELECT count(*) FROM booking_resources WHERE booking_id=$1) FROM bookings WHERE id=$1", roomBooking).Scan(&price, &resourceCount); err != nil {
+			t.Fatal(err)
+		}
+		if price != 123400 || resourceCount != 3 {
+			t.Fatal("room must have its own tariff and reserve all three resources")
+		}
+		if err := db.QueryRow(ctx, "SELECT count(*) FROM bookings WHERE workplace_id=ANY($1) AND cancelled_at IS NULL", []int64{chair, couch, room}).Scan(&recordCount); err != nil || recordCount != 1 {
+			t.Fatal("room created duplicate billable bookings", err)
+		}
+		expect(book(chair), 409)
+		expect(book(couch), 409)
+		otherBooking := bookingID(book(spare))
+		cancel(otherBooking)
+		update := func(id int64, links []int64) *httptest.ResponseRecorder {
+			return request("PUT", fmt.Sprintf("/api/admin/workplaces/%d", id), map[string]any{"name": "Updated", "hourlyPrice": 123400, "active": true, "linkedPlaceIds": links}, newAdmin)
+		}
+		expect(update(room, []int64{couch, chair}), 200)
+		expect(update(room, []int64{chair}), 409)
+		expect(update(chair, []int64{chair}), 400)
+		expect(update(spare, []int64{room}), 400)
+		expect(update(chair, []int64{spare}), 400)
+		expect(request("DELETE", fmt.Sprintf("/api/admin/workplaces/%d", chair), nil, newAdmin), 409)
+		cancel(roomBooking)
+		chairBooking = bookingID(book(chair))
+		cancel(chairBooking)
+		// A room and one of its resources cannot win simultaneous requests.
+		results := make(chan *httptest.ResponseRecorder, 2)
+		go func() { results <- book(room) }()
+		go func() { results <- book(chair) }()
+		ok, clash := 0, 0
+		for n := 0; n < 2; n++ {
+			response := <-results
+			if response.Code == 201 {
+				ok++
+				var item struct{ ID int64 }
+				json.Unmarshal(response.Body.Bytes(), &item)
+				roomBooking = item.ID
+			} else if response.Code == 409 {
+				clash++
+			} else {
+				t.Fatalf("unexpected concurrent result: %d %s", response.Code, response.Body.String())
+			}
+		}
+		if ok != 1 || clash != 1 {
+			t.Fatal("concurrent room/resource booking was not protected")
+		}
+		cancel(roomBooking)
+		expect(request("POST", "/api/bookings", map[string]any{"workplaceIds": []int64{room, chair}, "start": from, "end": to}, publicCookie), 400)
+		// Priority override cancels the room's single record and frees all resources.
+		roomBooking = bookingID(book(room))
+		var publicUser User
+		json.Unmarshal(request("GET", "/api/auth/me", nil, publicCookie).Body.Bytes(), &publicUser)
+		priority := request("POST", "/api/bookings", map[string]any{"workplaceId": chair, "clientId": publicUser.ClientID, "start": from, "end": to, "confirmedConflictIds": []int64{roomBooking}}, newAdmin)
+		chairBooking = bookingID(priority)
+		couchBooking = bookingID(book(couch))
+		cancel(chairBooking)
+		cancel(couchBooking)
+		// A reserved child blocks the room but not its sibling.
+		master := request("POST", "/api/admin/clients", map[string]any{"name": "Reserved chair", "role": "master", "workplaceIds": []int64{chair}, "workDays": []int{int(from.Weekday())}, "reserveWorkdays": true}, newAdmin)
+		expect(master, 200)
+		var masterID struct{ ID int64 }
+		json.Unmarshal(master.Body.Bytes(), &masterID)
+		expect(book(room), 409)
+		couchBooking = bookingID(book(couch))
+		cancel(couchBooking)
+		var configured []Workplace
+		json.Unmarshal(request("GET", "/api/workplaces", nil, nil).Body.Bytes(), &configured)
+		for _, p := range configured {
+			if p.ID == room && (len(p.LinkedPlaceIDs) != 2 || len(p.BlockedWeekdays) != 1) {
+				t.Fatal("room metadata does not include reserved resources")
+			}
+		}
+		expect(request("DELETE", fmt.Sprintf("/api/admin/clients/%d", masterID.ID), nil, newAdmin), 200)
+		// Deleting the parent cancels its booking and releases the children.
+		bookingID(book(room))
+		expect(request("DELETE", fmt.Sprintf("/api/admin/workplaces/%d", room), nil, newAdmin), 200)
+		chairBooking = bookingID(book(chair))
+		cancel(chairBooking)
+	})
+
 }

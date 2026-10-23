@@ -13,6 +13,10 @@ func (a *App) deleteCard(w http.ResponseWriter, r *http.Request, client bool) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if _, err = tx.Exec(r.Context(), "SELECT pg_advisory_xact_lock(78123457)"); err != nil {
+		dbError(w, err)
+		return
+	}
 	var id int64
 	if client {
 		var role string
@@ -40,11 +44,24 @@ func (a *App) deleteCard(w http.ResponseWriter, r *http.Request, client bool) {
 			}
 		}
 	} else {
+		var linked bool
+		if err = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM workplace_links l JOIN workplaces p ON p.id=l.workplace_id WHERE l.linked_id=$1 AND p.deleted_at IS NULL)", r.PathValue("id")).Scan(&linked); err != nil {
+			dbError(w, err)
+			return
+		}
+		if linked {
+			fail(w, 409, "Место входит в состав кабинета. Сначала уберите его из связанных мест кабинета.")
+			return
+		}
 		if err = tx.QueryRow(r.Context(), "UPDATE workplaces SET deleted_at=now(),active=false WHERE id=$1 AND deleted_at IS NULL RETURNING id", r.PathValue("id")).Scan(&id); err != nil {
 			dbError(w, err)
 			return
 		}
 		if _, err = tx.Exec(r.Context(), "DELETE FROM master_workplaces WHERE workplace_id=$1", id); err != nil {
+			dbError(w, err)
+			return
+		}
+		if _, err = tx.Exec(r.Context(), "DELETE FROM workplace_links WHERE workplace_id=$1", id); err != nil {
 			dbError(w, err)
 			return
 		}

@@ -8,12 +8,15 @@ import (
 )
 
 type Busy struct {
-	WorkplaceID int64     `json:"workplaceId"`
-	Start       time.Time `json:"start"`
-	End         time.Time `json:"end"`
-	Own         bool      `json:"own,omitempty"`
+	Booked        bool      `json:"booked,omitempty"`
+	BlockedByName string    `json:"blockedByName,omitempty"`
+	WorkplaceID   int64     `json:"workplaceId"`
+	Start         time.Time `json:"start"`
+	End           time.Time `json:"end"`
+	Own           bool      `json:"own,omitempty"`
 }
 type Booking struct {
+	ResourceIDs   []int64    `json:"resourceIds"`
 	ID            int64      `json:"id"`
 	WorkplaceID   int64      `json:"workplaceId"`
 	WorkplaceName string     `json:"workplaceName"`
@@ -38,7 +41,7 @@ func (a *App) availability(w http.ResponseWriter, r *http.Request) {
 		sessionHash = hash(cookie.Value)
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
-	rows, err := a.DB.Query(r.Context(), `SELECT workplace_id,starts_at,ends_at,EXISTS(SELECT 1 FROM sessions s JOIN accounts a ON a.id=s.account_id JOIN clients c ON c.id=a.client_id WHERE s.token_hash=$3 AND s.expires_at>now() AND c.deleted_at IS NULL AND c.id=bookings.client_id) FROM bookings WHERE cancelled_at IS NULL AND starts_at >= $1 AND starts_at < $2 ORDER BY starts_at`, date, date.AddDate(0, 0, 1), sessionHash)
+	rows, err := a.DB.Query(r.Context(), `SELECT DISTINCT wr.workplace_id,b.starts_at,b.ends_at,EXISTS(SELECT 1 FROM sessions s JOIN accounts a ON a.id=s.account_id JOIN clients c ON c.id=a.client_id WHERE s.token_hash=$3 AND s.expires_at>now() AND c.deleted_at IS NULL AND c.id=b.client_id),CASE WHEN wr.workplace_id<>b.workplace_id THEN booked_place.name ELSE '' END FROM bookings b JOIN workplaces booked_place ON booked_place.id=b.workplace_id JOIN booking_resources br ON br.booking_id=b.id JOIN workplace_resources wr ON wr.resource_id=br.resource_id JOIN workplaces p ON p.id=wr.workplace_id WHERE p.deleted_at IS NULL AND b.cancelled_at IS NULL AND b.starts_at >= $1 AND b.starts_at < $2 ORDER BY b.starts_at`, date, date.AddDate(0, 0, 1), sessionHash)
 	if err != nil {
 		dbError(w, err)
 		return
@@ -47,9 +50,14 @@ func (a *App) availability(w http.ResponseWriter, r *http.Request) {
 	items := []Busy{}
 	for rows.Next() {
 		var b Busy
-		if err = rows.Scan(&b.WorkplaceID, &b.Start, &b.End, &b.Own); err != nil {
+		if err = rows.Scan(&b.WorkplaceID, &b.Start, &b.End, &b.Own, &b.BlockedByName); err != nil {
 			dbError(w, err)
 			return
+		}
+		// Ownership applies only to the booked place, not to resources it blocks.
+		b.Booked = true
+		if b.BlockedByName != "" {
+			b.Own = false
 		}
 		items = append(items, b)
 	}
@@ -58,7 +66,7 @@ func (a *App) availability(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows.Close()
-	reservedRows, err := a.DB.Query(r.Context(), "SELECT DISTINCT mw.workplace_id FROM master_workplaces mw JOIN clients c ON c.id=mw.client_id JOIN workplaces p ON p.id=mw.workplace_id WHERE c.role='master' AND c.deleted_at IS NULL AND c.reserve_workdays AND $1=ANY(c.work_days) AND p.active", int(date.Weekday()))
+	reservedRows, err := a.DB.Query(r.Context(), "SELECT DISTINCT target.workplace_id FROM master_workplaces mw JOIN workplace_resources source ON source.workplace_id=mw.workplace_id JOIN workplace_resources target ON target.resource_id=source.resource_id JOIN clients c ON c.id=mw.client_id JOIN workplaces p ON p.id=target.workplace_id WHERE c.role='master' AND c.deleted_at IS NULL AND c.reserve_workdays AND $1=ANY(c.work_days) AND p.active AND p.deleted_at IS NULL", int(date.Weekday()))
 	if err != nil {
 		dbError(w, err)
 		return
@@ -103,7 +111,7 @@ func (a *App) bookings(w http.ResponseWriter, r *http.Request) {
 		}
 		until = last.AddDate(0, 0, 1)
 	}
-	rows, err := a.DB.Query(r.Context(), `SELECT b.id,b.workplace_id,p.name,b.client_id,c.name,b.starts_at,b.ends_at,b.hourly_price,b.cancelled_at,b.master_id,COALESCE(m.name,'') FROM bookings b JOIN workplaces p ON p.id=b.workplace_id JOIN clients c ON c.id=b.client_id LEFT JOIN clients m ON m.id=b.master_id WHERE (($1 AND b.starts_at >= $3 AND b.starts_at < $4) OR (NOT $1 AND (($5 <> 'master' AND b.client_id=$2) OR ($5='master' AND (b.master_id=$2 OR (b.master_id IS NULL AND EXISTS(SELECT 1 FROM master_workplaces mw WHERE mw.client_id=$2 AND mw.workplace_id=b.workplace_id))))))) ORDER BY b.starts_at DESC`, admin, u.ClientID, date, until, u.Role)
+	rows, err := a.DB.Query(r.Context(), `SELECT b.id,b.workplace_id,p.name,b.client_id,c.name,b.starts_at,b.ends_at,b.hourly_price,b.cancelled_at,b.master_id,COALESCE(m.name,''),ARRAY(SELECT resource_id FROM booking_resources WHERE booking_id=b.id ORDER BY resource_id) FROM bookings b JOIN workplaces p ON p.id=b.workplace_id JOIN clients c ON c.id=b.client_id LEFT JOIN clients m ON m.id=b.master_id WHERE (($1 AND b.starts_at >= $3 AND b.starts_at < $4) OR (NOT $1 AND (($5 <> 'master' AND b.client_id=$2) OR ($5='master' AND (b.master_id=$2 OR (b.master_id IS NULL AND EXISTS(SELECT 1 FROM master_workplaces mw WHERE mw.client_id=$2 AND EXISTS(SELECT 1 FROM booking_resources br JOIN workplace_resources wr ON wr.resource_id=br.resource_id WHERE br.booking_id=b.id AND wr.workplace_id=mw.workplace_id)))))))) ORDER BY b.starts_at DESC`, admin, u.ClientID, date, until, u.Role)
 	if err != nil {
 		dbError(w, err)
 		return
@@ -112,7 +120,7 @@ func (a *App) bookings(w http.ResponseWriter, r *http.Request) {
 	items := []Booking{}
 	for rows.Next() {
 		var b Booking
-		if err = rows.Scan(&b.ID, &b.WorkplaceID, &b.WorkplaceName, &b.ClientID, &b.ClientName, &b.Start, &b.End, &b.HourlyPrice, &b.CancelledAt, &b.MasterID, &b.MasterName); err != nil {
+		if err = rows.Scan(&b.ID, &b.WorkplaceID, &b.WorkplaceName, &b.ClientID, &b.ClientName, &b.Start, &b.End, &b.HourlyPrice, &b.CancelledAt, &b.MasterID, &b.MasterName, &b.ResourceIDs); err != nil {
 			dbError(w, err)
 			return
 		}
@@ -185,6 +193,10 @@ func (a *App) createBooking(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if _, err = tx.Exec(r.Context(), "SELECT pg_advisory_xact_lock(78123457)"); err != nil {
+		dbError(w, err)
+		return
+	}
 	var lockedClient int64
 	if err = tx.QueryRow(r.Context(), "SELECT id FROM clients WHERE id=$1 AND deleted_at IS NULL FOR SHARE", clientID).Scan(&lockedClient); err != nil {
 		dbError(w, err)
@@ -198,6 +210,15 @@ func (a *App) createBooking(w http.ResponseWriter, r *http.Request) {
 	}
 	// All creators lock places in the same order before checking conflicts.
 	// A concurrent booking cannot appear between confirmation and replacement.
+	var overlappingSelection bool
+	if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT resource_id FROM workplace_resources WHERE workplace_id=ANY($1) GROUP BY resource_id HAVING count(*)>1)`, body.WorkplaceIDs).Scan(&overlappingSelection); err != nil {
+		dbError(w, err)
+		return
+	}
+	if overlappingSelection {
+		fail(w, 400, "Выберите кабинет целиком или отдельные места: выбранные варианты включают одни и те же места.")
+		return
+	}
 	for _, workplaceID := range body.WorkplaceIDs {
 		if body.MasterID != 0 {
 			var linked bool
@@ -216,7 +237,7 @@ func (a *App) createBooking(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var reserved bool
-		if err = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM master_workplaces mw JOIN clients c ON c.id=mw.client_id WHERE mw.workplace_id=$1 AND c.role='master' AND c.deleted_at IS NULL AND c.reserve_workdays AND $2=ANY(c.work_days))", workplaceID, int(body.Start.In(Moscow).Weekday())).Scan(&reserved); err != nil {
+		if err = tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM master_workplaces mw JOIN clients c ON c.id=mw.client_id WHERE EXISTS(SELECT 1 FROM workplace_resources source JOIN workplace_resources target ON source.resource_id=target.resource_id WHERE source.workplace_id=mw.workplace_id AND target.workplace_id=$1) AND c.role='master' AND c.deleted_at IS NULL AND c.reserve_workdays AND $2=ANY(c.work_days))", workplaceID, int(body.Start.In(Moscow).Weekday())).Scan(&reserved); err != nil {
 			dbError(w, err)
 			return
 		}
@@ -227,7 +248,7 @@ func (a *App) createBooking(w http.ResponseWriter, r *http.Request) {
 	}
 	cancelledIDs := []int64{}
 	if u.Role == "admin" {
-		rows, err := tx.Query(r.Context(), `SELECT b.id,b.workplace_id,p.name,c.name,b.starts_at,b.ends_at FROM bookings b JOIN workplaces p ON p.id=b.workplace_id JOIN clients c ON c.id=b.client_id WHERE b.workplace_id=ANY($1) AND b.cancelled_at IS NULL AND b.starts_at<$3 AND b.ends_at>$2 ORDER BY b.id FOR UPDATE OF b`, body.WorkplaceIDs, body.Start, body.End)
+		rows, err := tx.Query(r.Context(), `SELECT b.id,b.workplace_id,p.name,c.name,b.starts_at,b.ends_at FROM bookings b JOIN workplaces p ON p.id=b.workplace_id JOIN clients c ON c.id=b.client_id WHERE EXISTS(SELECT 1 FROM booking_resources br JOIN workplace_resources wr ON wr.resource_id=br.resource_id WHERE br.booking_id=b.id AND wr.workplace_id=ANY($1)) AND b.cancelled_at IS NULL AND b.starts_at<$3 AND b.ends_at>$2 ORDER BY b.id FOR UPDATE OF b`, body.WorkplaceIDs, body.Start, body.End)
 		if err != nil {
 			dbError(w, err)
 			return
