@@ -1,0 +1,67 @@
+# Обновление одной командой
+
+Скрипт предназначен для существующей установки Ubuntu из инструкции Lavanda:
+исходники в `/root/lavanda-src/lavanda_be` и `/root/lavanda-src/lavanda_fe`,
+API в `/opt/lavanda`, сайт в `/var/www/lavanda`, база PostgreSQL `lavanda`,
+сервис systemd `lavanda`, конфигурация `/etc/lavanda.env`.
+
+## Установка (один раз, на сервере под root)
+
+```bash
+cd /root/lavanda-src/lavanda_be &&
+git pull --ff-only origin master &&
+install -o root -g root -m 750 deploy/update.sh /usr/local/sbin/lavanda-update
+```
+
+## Использование
+
+```bash
+lavanda-update           # Обе части (то же, что all)
+lavanda-update frontend  # Только фронтенд; API не останавливается
+lavanda-update backend   # Только бэкенд и миграции
+```
+
+Если меняется контракт API, обновляйте обе части. Скрипт проверяет чистоту
+репозиториев и ветку master, использует fast-forward pull, собирает последовательно
+и делает копии в `/var/backups/lavanda/<дата>-<pid>`. Повторный одновременный запуск
+блокируется. Конфигурация Nginx, HTTPS и `/etc/lavanda.env` не заменяются.
+
+Сборка выполняется до остановки API. При обновлении backend/all API останавливается
+на время дампа БД, миграции и публикации; при all обе сборки готовятся заранее.
+На сервере с 512 МБ RAM необходим swap. Зависимости: Git, Node.js/npm, Go,
+PostgreSQL client, sudo, curl, flock и стандартные утилиты Ubuntu.
+
+При ошибке скрипт останавливается и пишет этап и путь резервной копии.
+Ошибка после остановки API может оставить сервис остановленным. Не выполняйте
+автоматический откат бинарника после успешной миграции: новая схема может быть
+несовместима со старым кодом. Диагностика: `journalctl -u lavanda -n 100 --no-pager`.
+Дамп при неудачном pg_dump может быть неполным; пригодность копии нужно проверить
+перед восстановлением. База и бинарник автоматически не откатываются.
+
+Сайт публикуется копированием: сначала ресурсы, затем страницы. Это не атомарное
+переключение версии. Старые ресурсы и удалённые из исходников страницы сохраняются.
+Резервные копии не удаляются автоматически: следите за свободным местом.
+
+При изменении самого update.sh повторите команду установки. Уже установленная
+копия скрипта не заменяет себя во время исполнения.
+
+## Перенос почтовых настроек с Windows
+
+В PowerShell из папки проекта экспортируйте только настройки почты, без настроек БД:
+
+```powershell
+$mailLines = Get-Content D:\Projects\lavanda\lavanda_be\.env | Where-Object { $_ -match '^\s*(SMTP_HOST|SMTP_PORT|SMTP_USER|SMTP_PASSWORD|SMTP_FROM|ADMIN_NOTIFICATION_EMAIL)\s*=' }
+[System.IO.File]::WriteAllLines('D:\Projects\lavanda\lavanda_be\.env.mail', [string[]]$mailLines, [System.Text.UTF8Encoding]::new($false))
+```
+
+Файл `.env.mail` исключён из Git. Передайте его через WinSCP в `/root/lavanda-mail.env` на свой сервер. Затем под root:
+
+```bash
+cd /root/lavanda-src/lavanda_be &&
+git pull --ff-only origin master &&
+python3 deploy/import_mail_env.py /root/lavanda-mail.env &&
+rm -- /root/lavanda-mail.env &&
+systemctl restart lavanda
+```
+
+Импорт заменяет только перечисленные параметры, не исполняет содержимое файла и сохраняет резервную копию прежнего `/etc/lavanda.env` с правами только для root. При наличии `ADMIN_NOTIFICATION_EMAIL` в файле его значение тоже заменяется; пустое значение отключает уведомления. Изменение конфигурации не обновляет бинарник: если SMTP через порт 465 ещё не поддерживается установленной версией, сначала обновите приложение командой `lavanda-update`. Она также применит новые миграции.

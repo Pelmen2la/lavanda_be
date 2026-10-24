@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type Busy struct {
@@ -28,6 +29,7 @@ type Booking struct {
 	CancelledAt   *time.Time `json:"cancelledAt"`
 	MasterID      *int64     `json:"masterId"`
 	MasterName    string     `json:"masterName"`
+	Comment       string     `json:"comment"`
 }
 
 func (a *App) availability(w http.ResponseWriter, r *http.Request) {
@@ -111,7 +113,7 @@ func (a *App) bookings(w http.ResponseWriter, r *http.Request) {
 		}
 		until = last.AddDate(0, 0, 1)
 	}
-	rows, err := a.DB.Query(r.Context(), `SELECT b.id,b.workplace_id,p.name,b.client_id,c.name,b.starts_at,b.ends_at,b.hourly_price,b.cancelled_at,b.master_id,COALESCE(m.name,''),ARRAY(SELECT resource_id FROM booking_resources WHERE booking_id=b.id ORDER BY resource_id) FROM bookings b JOIN workplaces p ON p.id=b.workplace_id JOIN clients c ON c.id=b.client_id LEFT JOIN clients m ON m.id=b.master_id WHERE (($1 AND b.starts_at >= $3 AND b.starts_at < $4) OR (NOT $1 AND (($5 <> 'master' AND b.client_id=$2) OR ($5='master' AND (b.master_id=$2 OR (b.master_id IS NULL AND EXISTS(SELECT 1 FROM master_workplaces mw WHERE mw.client_id=$2 AND EXISTS(SELECT 1 FROM booking_resources br JOIN workplace_resources wr ON wr.resource_id=br.resource_id WHERE br.booking_id=b.id AND wr.workplace_id=mw.workplace_id)))))))) ORDER BY b.starts_at DESC`, admin, u.ClientID, date, until, u.Role)
+	rows, err := a.DB.Query(r.Context(), `SELECT b.id,b.workplace_id,p.name,b.client_id,c.name,b.starts_at,b.ends_at,b.hourly_price,b.cancelled_at,b.master_id,COALESCE(m.name,''),ARRAY(SELECT resource_id FROM booking_resources WHERE booking_id=b.id ORDER BY resource_id),b.comment FROM bookings b JOIN workplaces p ON p.id=b.workplace_id JOIN clients c ON c.id=b.client_id LEFT JOIN clients m ON m.id=b.master_id WHERE (($1 AND b.starts_at >= $3 AND b.starts_at < $4) OR (NOT $1 AND (($5 <> 'master' AND b.client_id=$2) OR ($5='master' AND (b.master_id=$2 OR (b.master_id IS NULL AND EXISTS(SELECT 1 FROM master_workplaces mw WHERE mw.client_id=$2 AND EXISTS(SELECT 1 FROM booking_resources br JOIN workplace_resources wr ON wr.resource_id=br.resource_id WHERE br.booking_id=b.id AND wr.workplace_id=mw.workplace_id)))))))) ORDER BY b.starts_at DESC`, admin, u.ClientID, date, until, u.Role)
 	if err != nil {
 		dbError(w, err)
 		return
@@ -120,7 +122,7 @@ func (a *App) bookings(w http.ResponseWriter, r *http.Request) {
 	items := []Booking{}
 	for rows.Next() {
 		var b Booking
-		if err = rows.Scan(&b.ID, &b.WorkplaceID, &b.WorkplaceName, &b.ClientID, &b.ClientName, &b.Start, &b.End, &b.HourlyPrice, &b.CancelledAt, &b.MasterID, &b.MasterName, &b.ResourceIDs); err != nil {
+		if err = rows.Scan(&b.ID, &b.WorkplaceID, &b.WorkplaceName, &b.ClientID, &b.ClientName, &b.Start, &b.End, &b.HourlyPrice, &b.CancelledAt, &b.MasterID, &b.MasterName, &b.ResourceIDs, &b.Comment); err != nil {
 			dbError(w, err)
 			return
 		}
@@ -145,8 +147,18 @@ func (a *App) createBooking(w http.ResponseWriter, r *http.Request) {
 		MasterID             int64     `json:"masterId"`
 		Start                time.Time `json:"start"`
 		End                  time.Time `json:"end"`
+		Comment              string    `json:"comment"`
 	}
 	if !decode(w, r, &body) {
+		return
+	}
+	body.Comment = strings.TrimSpace(body.Comment)
+	if utf8.RuneCountInString(body.Comment) > 2000 {
+		fail(w, 400, "Комментарий должен содержать не более 2000 символов")
+		return
+	}
+	if strings.ContainsRune(body.Comment, '\x00') {
+		fail(w, 400, "Комментарий содержит недопустимый символ")
 		return
 	}
 	if body.WorkplaceIDs != nil && body.WorkplaceID != 0 {
@@ -302,7 +314,7 @@ func (a *App) createBooking(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var id int64
-		err = tx.QueryRow(r.Context(), `INSERT INTO bookings(workplace_id,client_id,starts_at,ends_at,hourly_price,created_by,master_id) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,0)) RETURNING id`, workplaceID, clientID, body.Start, body.End, price, u.ID, body.MasterID).Scan(&id)
+		err = tx.QueryRow(r.Context(), `INSERT INTO bookings(workplace_id,client_id,starts_at,ends_at,hourly_price,created_by,master_id,comment) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,0),$8) RETURNING id`, workplaceID, clientID, body.Start, body.End, price, u.ID, body.MasterID, body.Comment).Scan(&id)
 		if err != nil {
 			dbError(w, err)
 			return
@@ -313,12 +325,8 @@ func (a *App) createBooking(w http.ResponseWriter, r *http.Request) {
 		dbError(w, err)
 		return
 	}
-	for _, id := range ids {
-		a.notifyBooking("Новая бронь", id)
-	}
-	for _, id := range cancelledIDs {
-		a.notifyBooking("Бронь отменена администратором из-за приоритетной записи", id)
-	}
+	a.notifyBooking("Новая бронь", ids...)
+	a.notifyBooking("Бронь отменена администратором из-за приоритетной записи", cancelledIDs...)
 	writeJSON(w, 201, map[string]any{"id": ids[0], "ids": ids})
 }
 func (a *App) cancelBooking(w http.ResponseWriter, r *http.Request) {

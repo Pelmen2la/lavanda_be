@@ -9,7 +9,7 @@ func (a *App) clientDetail(w http.ResponseWriter, r *http.Request) {
 		dbError(w, err)
 		return
 	}
-	rows, err := a.DB.Query(r.Context(), `SELECT b.id,b.workplace_id,p.name,b.client_id,c.name,b.starts_at,b.ends_at,b.hourly_price,b.cancelled_at,b.master_id,COALESCE(m.name,''),ARRAY(SELECT resource_id FROM booking_resources WHERE booking_id=b.id ORDER BY resource_id) FROM bookings b JOIN workplaces p ON p.id=b.workplace_id JOIN clients c ON c.id=b.client_id LEFT JOIN clients m ON m.id=b.master_id WHERE b.client_id=$1 OR ($2='master' AND (b.master_id=$1 OR (b.master_id IS NULL AND EXISTS(SELECT 1 FROM master_workplaces mw WHERE mw.client_id=$1 AND EXISTS(SELECT 1 FROM booking_resources br JOIN workplace_resources wr ON wr.resource_id=br.resource_id WHERE br.booking_id=b.id AND wr.workplace_id=mw.workplace_id))))) ORDER BY b.starts_at,b.id`, c.ID, c.Role)
+	rows, err := a.DB.Query(r.Context(), `SELECT b.id,b.workplace_id,p.name,b.client_id,c.name,b.starts_at,b.ends_at,b.hourly_price,b.cancelled_at,b.master_id,COALESCE(m.name,''),ARRAY(SELECT resource_id FROM booking_resources WHERE booking_id=b.id ORDER BY resource_id),b.comment FROM bookings b JOIN workplaces p ON p.id=b.workplace_id JOIN clients c ON c.id=b.client_id LEFT JOIN clients m ON m.id=b.master_id WHERE b.client_id=$1 OR ($2='master' AND (b.master_id=$1 OR (b.master_id IS NULL AND EXISTS(SELECT 1 FROM master_workplaces mw WHERE mw.client_id=$1 AND EXISTS(SELECT 1 FROM booking_resources br JOIN workplace_resources wr ON wr.resource_id=br.resource_id WHERE br.booking_id=b.id AND wr.workplace_id=mw.workplace_id))))) ORDER BY b.starts_at,b.id`, c.ID, c.Role)
 	if err != nil {
 		dbError(w, err)
 		return
@@ -18,7 +18,7 @@ func (a *App) clientDetail(w http.ResponseWriter, r *http.Request) {
 	bookings := []Booking{}
 	for rows.Next() {
 		var b Booking
-		if err = rows.Scan(&b.ID, &b.WorkplaceID, &b.WorkplaceName, &b.ClientID, &b.ClientName, &b.Start, &b.End, &b.HourlyPrice, &b.CancelledAt, &b.MasterID, &b.MasterName, &b.ResourceIDs); err != nil {
+		if err = rows.Scan(&b.ID, &b.WorkplaceID, &b.WorkplaceName, &b.ClientID, &b.ClientName, &b.Start, &b.End, &b.HourlyPrice, &b.CancelledAt, &b.MasterID, &b.MasterName, &b.ResourceIDs, &b.Comment); err != nil {
 			dbError(w, err)
 			return
 		}

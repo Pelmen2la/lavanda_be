@@ -185,6 +185,24 @@ INSERT INTO schema_migrations(version) VALUES(9)`); err != nil {
 			return err
 		}
 	}
+	if err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=11)").Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		if _, err = tx.Exec(ctx, `ALTER TABLE clients ADD COLUMN last_invitation_sent_at timestamptz;
+INSERT INTO schema_migrations(version) VALUES(11)`); err != nil {
+			return err
+		}
+	}
+	if err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=12)").Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		if _, err = tx.Exec(ctx, `ALTER TABLE bookings ADD COLUMN comment text NOT NULL DEFAULT '' CHECK (char_length(comment) <= 2000);
+INSERT INTO schema_migrations(version) VALUES(12)`); err != nil {
+			return err
+		}
+	}
 	return tx.Commit(ctx)
 }
 func hash(s string) string { v := sha256.Sum256([]byte(s)); return hex.EncodeToString(v[:]) }

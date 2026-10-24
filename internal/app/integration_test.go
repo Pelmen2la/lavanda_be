@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -60,6 +61,7 @@ func TestIntegration(t *testing.T) {
 	t.Setenv("ADMIN_LOGIN", "Initial.Admin")
 	t.Setenv("SMTP_HOST", "")
 	t.Setenv("TELEGRAM_BOT_TOKEN", "")
+	t.Setenv("ADMIN_NOTIFICATION_EMAIL", "")
 	if err = a.CreateAdmin(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +141,9 @@ func TestIntegration(t *testing.T) {
 	if current.URL != inv.URL {
 		t.Fatal("opening changed invitation")
 	}
+	if current.LastSentAt != nil || inv.LastSentAt != nil {
+		t.Fatal("unsent invitation has a send timestamp")
+	}
 	if !strings.Contains(request("GET", "/api/admin/clients", nil, admin).Body.String(), `"hasInvitation":true`) {
 		t.Fatal("missing invitation flag")
 	}
@@ -151,12 +156,41 @@ func TestIntegration(t *testing.T) {
 		delivered++
 		return nil
 	}
-	expect(request("POST", invitePath+"/send", nil, admin), 200)
+	sent := request("POST", invitePath+"/send", nil, admin)
+	expect(sent, 200)
+	var sentResult struct {
+		LastSentAt *time.Time `json:"lastSentAt"`
+	}
+	if err := json.Unmarshal(sent.Body.Bytes(), &sentResult); err != nil || sentResult.LastSentAt == nil || sentResult.LastSentAt.IsZero() {
+		t.Fatal("successful send must return its timestamp", err)
+	}
+	checkLastSent := func(want time.Time) {
+		t.Helper()
+		response := request("GET", invitePath, nil, admin)
+		expect(response, 200)
+		var reopened Invitation
+		if err := json.Unmarshal(response.Body.Bytes(), &reopened); err != nil || reopened.LastSentAt == nil || !reopened.LastSentAt.Equal(want) {
+			t.Fatalf("reopened invitation lost send timestamp: %s", response.Body.String())
+		}
+	}
+	checkLastSent(*sentResult.LastSentAt)
 	if delivered != 1 {
 		t.Fatal("email not sent")
 	}
+	// Reopening does not impose a persistent send restriction; a resend updates the date.
+	previousSend := sentResult.LastSentAt.Add(-time.Hour)
+	if _, err := db.Exec(ctx, "UPDATE clients SET last_invitation_sent_at=$1 WHERE id=$2", previousSend, client.ID); err != nil {
+		t.Fatal(err)
+	}
+	resent := request("POST", invitePath+"/send", nil, admin)
+	expect(resent, 200)
+	if err := json.Unmarshal(resent.Body.Bytes(), &sentResult); err != nil || sentResult.LastSentAt == nil || !sentResult.LastSentAt.After(previousSend) || delivered != 2 {
+		t.Fatal("resending did not update the timestamp", err)
+	}
+	checkLastSent(*sentResult.LastSentAt)
 	a.mailSender = func(string, string, string) error { return fmt.Errorf("delivery failed") }
 	expect(request("POST", invitePath+"/send", nil, admin), 502)
+	checkLastSent(*sentResult.LastSentAt)
 	if _, err := db.Exec(ctx, "UPDATE invitations SET expires_at=now()-interval '1 second' WHERE client_id=$1", client.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -176,6 +210,10 @@ func TestIntegration(t *testing.T) {
 	if current.URL == inv.URL {
 		t.Fatal("renewal did not rotate token")
 	}
+	if current.LastSentAt == nil || !current.LastSentAt.Equal(*sentResult.LastSentAt) {
+		t.Fatal("renewal must preserve the client's last invitation send date")
+	}
+	checkLastSent(*sentResult.LastSentAt)
 	oldToken := strings.Split(inv.URL, "#token=")[1]
 	expect(request("POST", "/api/auth/register", map[string]string{"token": oldToken, "password": "client-password", "confirmPassword": "client-password", "name": "Test Client", "phone": "+79991234567"}, nil), 400)
 	inviteToken := strings.Split(current.URL, "#token=")[1]
@@ -252,7 +290,35 @@ func TestIntegration(t *testing.T) {
 	expect(request("DELETE", sparePath, nil, admin), 404)
 	start := time.Now().In(Moscow).AddDate(0, 0, 1)
 	start = time.Date(start.Year(), start.Month(), start.Day(), 10, 0, 0, 0, Moscow)
-	body := map[string]any{"workplaceId": p.ID, "start": start, "end": start.Add(time.Hour)}
+	bookingComment := "Нужна розетка рядом.\nПожалуйста, подготовьте место."
+	body := map[string]any{"workplaceId": p.ID, "start": start, "end": start.Add(time.Hour), "comment": "  " + bookingComment + "  "}
+	t.Run("booking comment validation", func(t *testing.T) {
+		for _, comment := range []string{strings.Repeat("я", 2001), strings.Repeat("🙂", 2001), "invalid\x00comment", strings.Repeat("🙂", 2000), " \n "} {
+			r := request("POST", "/api/bookings", map[string]any{"workplaceId": p.ID, "start": start, "end": start.Add(time.Hour), "comment": comment}, user)
+			want := 400
+			if comment == strings.Repeat("🙂", 2000) || comment == " \n " {
+				want = 201
+			}
+			if r.Code != want {
+				t.Fatalf("comment validation: want %d, got %d: %s", want, r.Code, r.Body.String())
+			}
+			if want == 201 {
+				var created struct {
+					ID int64 `json:"id"`
+				}
+				if err := json.Unmarshal(r.Body.Bytes(), &created); err != nil {
+					t.Fatal(err)
+				}
+				var stored string
+				if err := db.QueryRow(ctx, "SELECT comment FROM bookings WHERE id=$1", created.ID).Scan(&stored); err != nil || stored != strings.TrimSpace(comment) {
+					t.Fatal("comment was not stored correctly", err)
+				}
+				if _, err := db.Exec(ctx, "DELETE FROM bookings WHERE id=$1", created.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	})
 	bodyOther := map[string]any{"workplaceId": p.ID, "clientId": account.ClientID + 999, "start": start, "end": start.Add(time.Hour)}
 	expect(request("POST", "/api/bookings", bodyOther, user), 403)
 	// Two concurrent requests must yield exactly one success and one conflict.
@@ -284,6 +350,201 @@ func TestIntegration(t *testing.T) {
 	if successes != 1 || conflicts != 1 {
 		t.Fatalf("success=%d conflict=%d", successes, conflicts)
 	}
+	t.Run("client booking isolation", func(t *testing.T) {
+		// A separate client/account/session must not inherit the first client's rights.
+		var otherClient, otherAccount int64
+		if err := db.QueryRow(ctx, "INSERT INTO clients(name,email) VALUES('Other client','isolation@example.test') RETURNING id").Scan(&otherClient); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.QueryRow(ctx, "INSERT INTO accounts(client_id,password_hash) VALUES($1,'unused-test-hash') RETURNING id", otherClient).Scan(&otherAccount); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			for _, query := range []string{"DELETE FROM bookings WHERE client_id=$1", "DELETE FROM accounts WHERE client_id=$1", "DELETE FROM clients WHERE id=$1"} {
+				if _, err := db.Exec(ctx, query, otherClient); err != nil {
+					t.Error(err)
+				}
+			}
+		}()
+		session := httptest.NewRecorder()
+		if err := a.setSession(session, httptest.NewRequest("GET", "/", nil), otherAccount); err != nil {
+			t.Fatal(err)
+		}
+		other := session.Result().Cookies()[0]
+		check := func(method, path string, body any, cookie *http.Cookie, status int) *httptest.ResponseRecorder {
+			t.Helper()
+			r := request(method, path, body, cookie)
+			if r.Code != status {
+				t.Fatalf("%s %s: want %d, got %d: %s", method, path, status, r.Code, r.Body.String())
+			}
+			return r
+		}
+		for _, path := range []string{"/api/bookings", fmt.Sprintf("/api/bookings?clientId=%d&role=admin", client.ID)} {
+			r := check("GET", path, nil, other, 200)
+			var records []Booking
+			if err := json.Unmarshal(r.Body.Bytes(), &records); err != nil || len(records) != 0 {
+				t.Fatalf("another client's bookings exposed: %s", r.Body.String())
+			}
+		}
+		check("GET", "/api/bookings", nil, nil, 401)
+		check("GET", "/api/admin/bookings?date="+start.Format("2006-01-02"), nil, other, 403)
+		check("GET", fmt.Sprintf("/api/admin/clients/%d", client.ID), nil, other, 403)
+		cancelPath := fmt.Sprintf("/api/bookings/%d/cancel", bookingID)
+		check("POST", cancelPath, map[string]any{}, nil, 401)
+		check("POST", cancelPath, map[string]any{}, other, 404)
+		check("POST", cancelPath, map[string]any{"clientId": client.ID, "role": "admin"}, other, 404)
+		check("POST", "/api/bookings", map[string]any{"workplaceId": p.ID, "clientId": client.ID, "start": start, "end": start.Add(time.Hour)}, other, 403)
+		check("POST", "/api/bookings", map[string]any{"workplaceId": p.ID, "confirmedConflictIds": []int64{bookingID}, "start": start, "end": start.Add(time.Hour)}, other, 403)
+		conflict := check("POST", "/api/bookings", body, other, 409)
+		if strings.Contains(conflict.Body.String(), "clientName") || strings.Contains(conflict.Body.String(), "conflicts") {
+			t.Fatal("client conflict response exposes booking details")
+		}
+		var unchanged bool
+		if err := db.QueryRow(ctx, "SELECT cancelled_at IS NULL AND client_id=$2 FROM bookings WHERE id=$1", bookingID, client.ID).Scan(&unchanged); err != nil || !unchanged {
+			t.Fatal("foreign booking was changed", err)
+		}
+		availability := check("GET", "/api/availability?date="+start.Format("2006-01-02"), nil, other, 200)
+		for _, field := range []string{`"clientId"`, `"clientName"`, `"id"`, `"email"`, `"own":true`, `"comment"`, bookingComment} {
+			if strings.Contains(availability.Body.String(), field) {
+				t.Fatalf("availability leaked %s", field)
+			}
+		}
+		// Positive control: the second client can see/cancel their own new booking.
+		created := check("POST", "/api/bookings", map[string]any{"workplaceId": p.ID, "start": start.AddDate(0, 0, 5), "end": start.AddDate(0, 0, 5).Add(time.Hour)}, other, 201)
+		var own struct {
+			ID int64 `json:"id"`
+		}
+		if err := json.Unmarshal(created.Body.Bytes(), &own); err != nil {
+			t.Fatal(err)
+		}
+		for _, viewer := range []*http.Cookie{user, other} {
+			r := check("GET", "/api/bookings", nil, viewer, 200)
+			var records []Booking
+			if err := json.Unmarshal(r.Body.Bytes(), &records); err != nil {
+				t.Fatal(err)
+			}
+			want := client.ID
+			if viewer == other {
+				want = otherClient
+			}
+			if len(records) == 0 {
+				t.Fatal("own booking missing")
+			}
+			for _, b := range records {
+				if b.ClientID != want {
+					t.Fatal("cross-client booking exposure")
+				}
+			}
+		}
+		check("POST", fmt.Sprintf("/api/bookings/%d/cancel", own.ID), map[string]any{}, user, 404)
+		check("POST", fmt.Sprintf("/api/bookings/%d/cancel", own.ID), map[string]any{}, other, 200)
+	})
+	t.Run("admin booking email notifications", func(t *testing.T) {
+		t.Setenv("ADMIN_NOTIFICATION_EMAIL", "notifications@example.test")
+		type email struct{ to, subject, body string }
+		messages := make(chan email, 10)
+		var failDelivery atomic.Bool
+		notifying := &App{DB: db, Config: a.Config, attempts: map[string]bucket{}, mailSender: func(to, subject, body string) error {
+			messages <- email{to, subject, body}
+			if failDelivery.Load() {
+				return fmt.Errorf("test SMTP failure")
+			}
+			return nil
+		}}
+		previousHandler := handler
+		handler = notifying.Handler()
+		defer func() { handler = previousHandler }()
+		check := func(method, path string, data any, cookie *http.Cookie, want int) *httptest.ResponseRecorder {
+			t.Helper()
+			r := request(method, path, data, cookie)
+			if r.Code != want {
+				t.Fatalf("%s %s: want %d, got %d: %s", method, path, want, r.Code, r.Body.String())
+			}
+			return r
+		}
+		receive := func() email {
+			t.Helper()
+			select {
+			case m := <-messages:
+				if m.to != "notifications@example.test" || !strings.Contains(m.body, "Test Client") || !strings.Contains(m.body, "МСК") {
+					t.Fatalf("incorrect admin notification: %+v", m)
+				}
+				return m
+			case <-time.After(3 * time.Second):
+				t.Fatal("admin email was not sent without Telegram")
+			}
+			return email{}
+		}
+		createdPlace := check("POST", "/api/admin/workplaces", map[string]any{"name": "Notification place", "hourlyPrice": 10000, "active": true}, admin, 200)
+		var otherPlace struct {
+			ID int64 `json:"id"`
+		}
+		if err := json.Unmarshal(createdPlace.Body.Bytes(), &otherPlace); err != nil {
+			t.Fatal(err)
+		}
+		notificationStart := start.AddDate(0, 0, 10)
+		defer func() {
+			if _, err := db.Exec(ctx, "DELETE FROM bookings WHERE starts_at=$1", notificationStart); err != nil {
+				t.Error(err)
+			}
+			if _, err := db.Exec(ctx, "DELETE FROM workplaces WHERE id=$1", otherPlace.ID); err != nil {
+				t.Error(err)
+			}
+		}()
+		bookingData := map[string]any{"workplaceIds": []int64{p.ID, otherPlace.ID}, "start": notificationStart, "end": notificationStart.Add(time.Hour), "comment": "Общий комментарий к местам"}
+		created := check("POST", "/api/bookings", bookingData, user, 201)
+		var batch struct {
+			IDs []int64 `json:"ids"`
+		}
+		if err := json.Unmarshal(created.Body.Bytes(), &batch); err != nil || len(batch.IDs) != 2 {
+			t.Fatal("missing batch IDs", err)
+		}
+		var commented int
+		if err := db.QueryRow(ctx, "SELECT count(*) FROM bookings WHERE id=ANY($1) AND comment=$2", batch.IDs, bookingData["comment"]).Scan(&commented); err != nil || commented != 2 {
+			t.Fatal("batch comment was not copied to all places", err)
+		}
+		m := receive()
+		if !strings.Contains(m.subject, "Новая бронь") || !strings.Contains(m.body, "Notification place") {
+			t.Fatal("incorrect booking email")
+		}
+		for _, id := range batch.IDs {
+			if !strings.Contains(m.body, fmt.Sprintf("Запись №%d", id)) {
+				t.Fatal("batch email omitted a booking")
+			}
+		}
+		check("POST", "/api/bookings", bookingData, user, 409)
+		// Priority replacement must notify both creation and cancellation after commit.
+		bookingData["clientId"] = client.ID
+		check("POST", "/api/bookings", bookingData, admin, 409)
+		bookingData["confirmedConflictIds"] = batch.IDs
+		replaced := check("POST", "/api/bookings", bookingData, admin, 201)
+		if err := json.Unmarshal(replaced.Body.Bytes(), &batch); err != nil {
+			t.Fatal(err)
+		}
+		events := []string{receive().subject, receive().subject}
+		if !strings.Contains(strings.Join(events, "|"), "Новая бронь") || !strings.Contains(strings.Join(events, "|"), "приоритетной записи") {
+			t.Fatal("missing priority notifications", events)
+		}
+		// SMTP failure must not roll back a user's cancellation.
+		failDelivery.Store(true)
+		cancelPath := fmt.Sprintf("/api/bookings/%d/cancel", batch.IDs[0])
+		check("POST", cancelPath, map[string]any{}, user, 200)
+		if m := receive(); !strings.Contains(m.subject, "Бронь отменена") {
+			t.Fatal("missing cancellation notification")
+		}
+		var cancelled bool
+		if err := db.QueryRow(ctx, "SELECT cancelled_at IS NOT NULL FROM bookings WHERE id=$1", batch.IDs[0]).Scan(&cancelled); err != nil || !cancelled {
+			t.Fatal("SMTP error affected booking cancellation", err)
+		}
+		check("POST", cancelPath, map[string]any{}, user, 404)
+		check("DELETE", fmt.Sprintf("/api/admin/workplaces/%d", otherPlace.ID), nil, admin, 200)
+		if m := receive(); !strings.Contains(m.subject, "при удалении карточки") {
+			t.Fatal("missing deletion cancellation notification")
+		}
+		if len(messages) != 0 {
+			t.Fatal("unexpected email for a failed operation or duplicate batch email")
+		}
+	})
 	expect(request("POST", "/api/bookings", body, masterCookie), 403)
 	expect(request("POST", fmt.Sprintf("/api/bookings/%d/cancel", bookingID), map[string]string{}, masterCookie), 403)
 	masterBookings := request("GET", "/api/bookings", nil, masterCookie)
@@ -322,6 +583,26 @@ func TestIntegration(t *testing.T) {
 	if detail.Client.ID != client.ID || len(detail.Bookings) != 2 || detail.Client.CreatedAt.IsZero() {
 		t.Fatal("incomplete client profile")
 	}
+	for _, b := range detail.Bookings {
+		if b.ID == bookingID && b.Comment != bookingComment {
+			t.Fatal("client profile lost booking comment")
+		}
+		if b.ID != bookingID && b.Comment != "" {
+			t.Fatal("booking without comment must return an empty string")
+		}
+	}
+	var ownBookings []Booking
+	if err := json.Unmarshal(request("GET", "/api/bookings", nil, user).Body.Bytes(), &ownBookings); err != nil {
+		t.Fatal(err)
+	}
+	if len(ownBookings) != 2 {
+		t.Fatal("missing client bookings")
+	}
+	for _, b := range ownBookings {
+		if b.ID == bookingID && b.Comment != bookingComment {
+			t.Fatal("client cannot read their booking comment")
+		}
+	}
 	expect(request("GET", detailPath, nil, user), 403)
 	expect(request("GET", detailPath, nil, nil), 401)
 	expect(request("GET", "/api/admin/clients/999999999", nil, admin), 404)
@@ -334,6 +615,11 @@ func TestIntegration(t *testing.T) {
 	}
 	if len(rangeBookings) != 2 {
 		t.Fatal("range must include both bookings on its last day", len(rangeBookings))
+	}
+	for _, b := range rangeBookings {
+		if b.ID == bookingID && b.Comment != bookingComment {
+			t.Fatal("admin cannot read booking comment")
+		}
 	}
 	expect(request("GET", "/api/admin/bookings?from=2026-10-20&to=2026-10-19", nil, admin), 400)
 	expect(request("GET", "/api/admin/bookings?from=invalid&to=2026-10-19", nil, admin), 400)
@@ -357,7 +643,7 @@ func TestIntegration(t *testing.T) {
 			}
 		}
 	}
-	for _, secret := range []string{"clientId", "Test Client", "private-note", "email"} {
+	for _, secret := range []string{"clientId", "Test Client", "private-note", "email", `"comment"`, bookingComment} {
 		if strings.Contains(availability.Body.String(), secret) {
 			t.Fatal("public availability leaked", secret)
 		}

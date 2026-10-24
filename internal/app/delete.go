@@ -95,8 +95,6 @@ func (a *App) deleteCard(w http.ResponseWriter, r *http.Request, client bool) {
 		dbError(w, err)
 		return
 	}
-	for _, bookingID := range cancelled {
-		a.notifyBooking("Бронь отменена при удалении карточки", bookingID)
-	}
+	a.notifyBooking("Бронь отменена при удалении карточки", cancelled...)
 	writeJSON(w, 200, map[string]any{"ok": true, "cancelledCount": len(cancelled)})
 }

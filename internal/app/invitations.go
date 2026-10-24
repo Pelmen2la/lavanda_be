@@ -11,9 +11,10 @@ import (
 )
 
 type Invitation struct {
-	URL       string    `json:"url"`
-	ExpiresAt time.Time `json:"expiresAt"`
-	Expired   bool      `json:"expired"`
+	URL        string     `json:"url"`
+	ExpiresAt  time.Time  `json:"expiresAt"`
+	Expired    bool       `json:"expired"`
+	LastSentAt *time.Time `json:"lastSentAt"`
 }
 
 // Invitation links are credentials: expose them only through admin-protected
@@ -21,10 +22,10 @@ type Invitation struct {
 func (a *App) readInvitation(w http.ResponseWriter, r *http.Request) (Invitation, string, bool) {
 	var inv Invitation
 	var value, email string
-	err := a.DB.QueryRow(r.Context(), `SELECT COALESCE(i.token_value,''),i.expires_at,c.email
+	err := a.DB.QueryRow(r.Context(), `SELECT COALESCE(i.token_value,''),i.expires_at,c.email,c.last_invitation_sent_at
  FROM invitations i JOIN clients c ON c.id=i.client_id
  WHERE c.id=$1 AND c.deleted_at IS NULL AND i.used_at IS NULL AND NOT EXISTS(SELECT 1 FROM accounts WHERE client_id=c.id)
- ORDER BY i.expires_at DESC LIMIT 1`, r.PathValue("id")).Scan(&value, &inv.ExpiresAt, &email)
+ ORDER BY i.expires_at DESC LIMIT 1`, r.PathValue("id")).Scan(&value, &inv.ExpiresAt, &email, &inv.LastSentAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		fail(w, 404, "Приглашение не найдено или уже использовано")
 		return inv, "", false
@@ -72,5 +73,11 @@ func (a *App) emailInvite(w http.ResponseWriter, r *http.Request) {
 		fail(w, 502, "Не удалось отправить письмо. Проверьте настройки SMTP и попробуйте ещё раз.")
 		return
 	}
-	writeJSON(w, 200, map[string]string{"message": "Письмо передано почтовому серверу", "email": email})
+	// Keep the client's last successful send even when the invitation is renewed.
+	var sentAt time.Time
+	if err := a.DB.QueryRow(r.Context(), "UPDATE clients SET last_invitation_sent_at=clock_timestamp() WHERE id=$1 RETURNING last_invitation_sent_at", r.PathValue("id")).Scan(&sentAt); err != nil {
+		dbError(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"message": "Письмо передано почтовому серверу", "email": email, "lastSentAt": sentAt})
 }

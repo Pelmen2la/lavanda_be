@@ -180,7 +180,8 @@ func (a *App) invite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var id int64
-	err = tx.QueryRow(r.Context(), "SELECT id FROM clients WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", r.PathValue("id")).Scan(&id)
+	var lastSentAt *time.Time
+	err = tx.QueryRow(r.Context(), "SELECT id,last_invitation_sent_at FROM clients WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", r.PathValue("id")).Scan(&id, &lastSentAt)
 	if err != nil {
 		dbError(w, err)
 		return
@@ -209,7 +210,7 @@ func (a *App) invite(w http.ResponseWriter, r *http.Request) {
 		dbError(w, err)
 		return
 	}
-	writeJSON(w, 201, Invitation{URL: a.Config.PublicURL + "/register/#token=" + t, ExpiresAt: expires})
+	writeJSON(w, 201, Invitation{URL: a.Config.PublicURL + "/register/#token=" + t, ExpiresAt: expires, LastSentAt: lastSentAt})
 }
 
 type Workplace struct {
