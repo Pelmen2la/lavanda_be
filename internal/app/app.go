@@ -203,6 +203,16 @@ INSERT INTO schema_migrations(version) VALUES(12)`); err != nil {
 			return err
 		}
 	}
+	if _, err = tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS workplace_photos (
+ id bigserial PRIMARY KEY,
+ workplace_id bigint NOT NULL REFERENCES workplaces(id) ON DELETE CASCADE,
+ content_type text NOT NULL CHECK(content_type IN ('image/jpeg','image/png')),
+ data bytea NOT NULL CHECK(octet_length(data) <= 5242880)
+);
+CREATE INDEX IF NOT EXISTS workplace_photos_place_idx ON workplace_photos(workplace_id,id);
+INSERT INTO schema_migrations(version) VALUES(13) ON CONFLICT DO NOTHING`); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 func hash(s string) string { v := sha256.Sum256([]byte(s)); return hex.EncodeToString(v[:]) }
@@ -326,6 +336,10 @@ func (a *App) Handler() http.Handler {
 		writeJSON(w, 200, map[string]bool{"ok": true})
 	})
 	m.HandleFunc("GET /api/workplaces", a.workplaces)
+	m.HandleFunc("GET /api/workplace-photos/{photoId}", a.photo)
+	m.HandleFunc("GET /api/admin/workplace-photos/{photoId}", a.protect(a.photo, true))
+	m.HandleFunc("POST /api/admin/workplaces/{id}/photos", a.protect(a.uploadPhoto, true))
+	m.HandleFunc("DELETE /api/admin/workplaces/{id}/photos/{photoId}", a.protect(a.deletePhoto, true))
 	m.HandleFunc("GET /api/availability", a.availability)
 	m.HandleFunc("POST /api/auth/login", a.rate(a.login))
 	m.HandleFunc("POST /api/auth/register", a.rate(a.register))

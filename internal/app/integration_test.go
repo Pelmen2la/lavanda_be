@@ -235,6 +235,7 @@ func TestIntegration(t *testing.T) {
 	if account.ClientID != client.ID {
 		t.Fatal("invitation bound wrong client")
 	}
+	t.Run("workplace photos", func(t *testing.T) { testPhotosIntegration(t, request, admin, user) })
 	place := request("POST", "/api/admin/workplaces", map[string]any{"name": "Test place", "description": "Description", "hourlyPrice": 100000, "active": true}, admin)
 	expect(place, 200)
 	var p struct {
@@ -350,6 +351,42 @@ func TestIntegration(t *testing.T) {
 	if successes != 1 || conflicts != 1 {
 		t.Fatalf("success=%d conflict=%d", successes, conflicts)
 	}
+	t.Run("client booking workplace photo", func(t *testing.T) {
+		uploaded := request("POST", fmt.Sprintf("/api/admin/workplaces/%d/photos", p.ID), map[string]any{"data": photoFixture(t, "jpeg")}, admin)
+		if uploaded.Code != 201 {
+			t.Fatal("photo upload failed", uploaded.Code)
+		}
+		var photo struct {
+			ID int64 `json:"id"`
+		}
+		if err := json.Unmarshal(uploaded.Body.Bytes(), &photo); err != nil {
+			t.Fatal(err)
+		}
+		defer db.Exec(ctx, "DELETE FROM workplace_photos WHERE id=$1", photo.ID)
+		response := request("GET", "/api/bookings", nil, user)
+		if response.Code != 200 {
+			t.Fatal("bookings failed", response.Code)
+		}
+		var bookings []Booking
+		if err := json.Unmarshal(response.Body.Bytes(), &bookings); err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, b := range bookings {
+			if b.ID == bookingID {
+				found = true
+				if len(b.PhotoIDs) != 1 || b.PhotoIDs[0] != photo.ID {
+					t.Fatal("missing workplace photo")
+				}
+			}
+		}
+		if !found {
+			t.Fatal("booking missing")
+		}
+		if response := request("GET", fmt.Sprintf("/api/workplace-photos/%d", photo.ID), nil, user); response.Code != 200 {
+			t.Fatal("photo unavailable", response.Code)
+		}
+	})
 	t.Run("client booking isolation", func(t *testing.T) {
 		// A separate client/account/session must not inherit the first client's rights.
 		var otherClient, otherAccount int64
@@ -468,6 +505,12 @@ func TestIntegration(t *testing.T) {
 			case m := <-messages:
 				if m.to != "notifications@example.test" || !strings.Contains(m.body, "Test Client") || !strings.Contains(m.body, "МСК") {
 					t.Fatalf("incorrect admin notification: %+v", m)
+				}
+				if !strings.Contains(m.body, fmt.Sprintf(`<a href="%s/admin/clients/profile/?id=%d">Test Client</a>`, a.Config.PublicURL, client.ID)) {
+					t.Fatal("missing client profile link in booking notification")
+				}
+				if !strings.Contains(m.body, "<strong>Комментарий:</strong><br>Общий комментарий к местам") {
+					t.Fatal("missing booking comment in notification")
 				}
 				return m
 			case <-time.After(3 * time.Second):

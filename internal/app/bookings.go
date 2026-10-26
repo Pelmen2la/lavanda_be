@@ -17,6 +17,7 @@ type Busy struct {
 	Own           bool      `json:"own,omitempty"`
 }
 type Booking struct {
+	PhotoIDs      []int64    `json:"photoIds"`
 	ResourceIDs   []int64    `json:"resourceIds"`
 	ID            int64      `json:"id"`
 	WorkplaceID   int64      `json:"workplaceId"`
@@ -113,7 +114,7 @@ func (a *App) bookings(w http.ResponseWriter, r *http.Request) {
 		}
 		until = last.AddDate(0, 0, 1)
 	}
-	rows, err := a.DB.Query(r.Context(), `SELECT b.id,b.workplace_id,p.name,b.client_id,c.name,b.starts_at,b.ends_at,b.hourly_price,b.cancelled_at,b.master_id,COALESCE(m.name,''),ARRAY(SELECT resource_id FROM booking_resources WHERE booking_id=b.id ORDER BY resource_id),b.comment FROM bookings b JOIN workplaces p ON p.id=b.workplace_id JOIN clients c ON c.id=b.client_id LEFT JOIN clients m ON m.id=b.master_id WHERE (($1 AND b.starts_at >= $3 AND b.starts_at < $4) OR (NOT $1 AND (($5 <> 'master' AND b.client_id=$2) OR ($5='master' AND (b.master_id=$2 OR (b.master_id IS NULL AND EXISTS(SELECT 1 FROM master_workplaces mw WHERE mw.client_id=$2 AND EXISTS(SELECT 1 FROM booking_resources br JOIN workplace_resources wr ON wr.resource_id=br.resource_id WHERE br.booking_id=b.id AND wr.workplace_id=mw.workplace_id)))))))) ORDER BY b.starts_at DESC`, admin, u.ClientID, date, until, u.Role)
+	rows, err := a.DB.Query(r.Context(), `SELECT b.id,b.workplace_id,p.name,b.client_id,c.name,b.starts_at,b.ends_at,b.hourly_price,b.cancelled_at,b.master_id,COALESCE(m.name,''),ARRAY(SELECT resource_id FROM booking_resources WHERE booking_id=b.id ORDER BY resource_id),b.comment,ARRAY(SELECT ph.id FROM workplace_photos ph WHERE ph.workplace_id=p.id AND p.active AND p.deleted_at IS NULL ORDER BY ph.id) FROM bookings b JOIN workplaces p ON p.id=b.workplace_id JOIN clients c ON c.id=b.client_id LEFT JOIN clients m ON m.id=b.master_id WHERE (($1 AND b.starts_at >= $3 AND b.starts_at < $4) OR (NOT $1 AND (($5 <> 'master' AND b.client_id=$2) OR ($5='master' AND (b.master_id=$2 OR (b.master_id IS NULL AND EXISTS(SELECT 1 FROM master_workplaces mw WHERE mw.client_id=$2 AND EXISTS(SELECT 1 FROM booking_resources br JOIN workplace_resources wr ON wr.resource_id=br.resource_id WHERE br.booking_id=b.id AND wr.workplace_id=mw.workplace_id)))))))) ORDER BY b.starts_at DESC`, admin, u.ClientID, date, until, u.Role)
 	if err != nil {
 		dbError(w, err)
 		return
@@ -122,7 +123,7 @@ func (a *App) bookings(w http.ResponseWriter, r *http.Request) {
 	items := []Booking{}
 	for rows.Next() {
 		var b Booking
-		if err = rows.Scan(&b.ID, &b.WorkplaceID, &b.WorkplaceName, &b.ClientID, &b.ClientName, &b.Start, &b.End, &b.HourlyPrice, &b.CancelledAt, &b.MasterID, &b.MasterName, &b.ResourceIDs, &b.Comment); err != nil {
+		if err = rows.Scan(&b.ID, &b.WorkplaceID, &b.WorkplaceName, &b.ClientID, &b.ClientName, &b.Start, &b.End, &b.HourlyPrice, &b.CancelledAt, &b.MasterID, &b.MasterName, &b.ResourceIDs, &b.Comment, &b.PhotoIDs); err != nil {
 			dbError(w, err)
 			return
 		}

@@ -114,6 +114,47 @@ func TestBookingNotificationsDisabled(t *testing.T) {
 	a.notifyBooking("Бронь отменена")
 }
 
+func TestBookingEmailSubject(t *testing.T) {
+	start := time.Date(2026, 10, 27, 6, 0, 0, 0, time.UTC)
+	subject := bookingEmailSubject("Новая бронь", 123, start, 1, "Анна Иванова")
+	if subject != "Новая бронь · №123 · Анна Иванова · 27.10.2026 09:00 МСК — Лаванда" {
+		t.Fatal("incorrect subject", subject)
+	}
+	if subject == bookingEmailSubject("Новая бронь", 124, start, 1, "Анна Иванова") || subject == bookingEmailSubject("Бронь отменена", 123, start, 1, "Анна Иванова") {
+		t.Fatal("different bookings or events share a subject")
+	}
+	if normalized := bookingEmailSubject("Новая бронь", 123, start, 1, " Анна\r\nИванова "); normalized != subject {
+		t.Fatal("client name whitespace not normalized", normalized)
+	}
+	if batch := bookingEmailSubject("Новая бронь", 123, start, 3, "Анна Иванова"); !strings.Contains(batch, "№123 и ещё 2") {
+		t.Fatal("missing batch count", batch)
+	}
+}
+
+func TestBookingEmailClientLink(t *testing.T) {
+	start := time.Date(2026, 10, 27, 9, 0, 0, 0, Moscow)
+	body := bookingEmailDetail("http://localhost:3000", 12, 34, `Анна <script> & "Имя"`, "Место <1>", start, start.Add(time.Hour), "")
+	if !strings.Contains(body, `<a href="http://localhost:3000/admin/clients/profile/?id=34">Анна &lt;script&gt; &amp; &#34;Имя&#34;</a>`) {
+		t.Fatal("missing escaped client link", body)
+	}
+	if strings.Contains(body, "<script>") || !strings.Contains(body, "Место &lt;1&gt;") || !strings.Contains(body, "27.10.2026 09:00–10:00 МСК") {
+		t.Fatal("invalid email content", body)
+	}
+}
+
+func TestBookingEmailComment(t *testing.T) {
+	start := time.Date(2026, 10, 27, 9, 0, 0, 0, Moscow)
+	for _, comment := range []string{"", " \n "} {
+		if body := bookingEmailDetail("http://localhost:3000", 1, 2, "Клиент", "Место", start, start.Add(time.Hour), comment); strings.Contains(body, "Комментарий:") {
+			t.Fatal("empty comment rendered")
+		}
+	}
+	body := bookingEmailDetail("http://localhost:3000", 1, 2, "Клиент", "Место", start, start.Add(time.Hour), "Первая строка\r\n<script> & текст\nПоследняя строка")
+	if !strings.Contains(body, "<strong>Комментарий:</strong><br>Первая строка<br>&lt;script&gt; &amp; текст<br>Последняя строка") || strings.Contains(body, "<script>") {
+		t.Fatal("comment escaping or line breaks incorrect", body)
+	}
+}
+
 func serveTestSMTP(conn net.Conn, config *tls.Config, implicitTLS, startTLS bool) error {
 	secure := false
 	upgrade := func() error {

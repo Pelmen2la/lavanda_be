@@ -214,6 +214,7 @@ func (a *App) invite(w http.ResponseWriter, r *http.Request) {
 }
 
 type Workplace struct {
+	PhotoIDs        []int64 `json:"photoIds"`
 	ID              int64   `json:"id"`
 	Name            string  `json:"name"`
 	Description     string  `json:"description"`
@@ -226,7 +227,7 @@ type Workplace struct {
 
 func (a *App) workplaces(w http.ResponseWriter, r *http.Request) {
 	all := strings.HasPrefix(r.URL.Path, "/api/admin/")
-	rows, err := a.DB.Query(r.Context(), "SELECT p.id,p.name,p.description,p.hourly_price,p.active,ARRAY(SELECT DISTINCT unnest(c.work_days) FROM master_workplaces mw JOIN clients c ON c.id=mw.client_id WHERE EXISTS(SELECT 1 FROM workplace_resources target JOIN workplace_resources source ON source.resource_id=target.resource_id WHERE target.workplace_id=p.id AND source.workplace_id=mw.workplace_id) AND c.role='master' AND c.deleted_at IS NULL AND c.reserve_workdays),ARRAY(SELECT linked_id FROM workplace_links WHERE workplace_id=p.id ORDER BY linked_id),ARRAY(SELECT resource_id FROM workplace_resources WHERE workplace_id=p.id ORDER BY resource_id) FROM workplaces p WHERE p.deleted_at IS NULL AND (p.active OR $1) ORDER BY p.id", all)
+	rows, err := a.DB.Query(r.Context(), "SELECT p.id,p.name,p.description,p.hourly_price,p.active,ARRAY(SELECT DISTINCT unnest(c.work_days) FROM master_workplaces mw JOIN clients c ON c.id=mw.client_id WHERE EXISTS(SELECT 1 FROM workplace_resources target JOIN workplace_resources source ON source.resource_id=target.resource_id WHERE target.workplace_id=p.id AND source.workplace_id=mw.workplace_id) AND c.role='master' AND c.deleted_at IS NULL AND c.reserve_workdays),ARRAY(SELECT linked_id FROM workplace_links WHERE workplace_id=p.id ORDER BY linked_id),ARRAY(SELECT resource_id FROM workplace_resources WHERE workplace_id=p.id ORDER BY resource_id),ARRAY(SELECT id FROM workplace_photos WHERE workplace_id=p.id ORDER BY id) FROM workplaces p WHERE p.deleted_at IS NULL AND (p.active OR $1) ORDER BY p.id", all)
 	if err != nil {
 		dbError(w, err)
 		return
@@ -235,7 +236,7 @@ func (a *App) workplaces(w http.ResponseWriter, r *http.Request) {
 	items := []Workplace{}
 	for rows.Next() {
 		var p Workplace
-		if err = rows.Scan(&p.ID, &p.Name, &p.Description, &p.HourlyPrice, &p.Active, &p.BlockedWeekdays, &p.LinkedPlaceIDs, &p.ResourceIDs); err != nil {
+		if err = rows.Scan(&p.ID, &p.Name, &p.Description, &p.HourlyPrice, &p.Active, &p.BlockedWeekdays, &p.LinkedPlaceIDs, &p.ResourceIDs, &p.PhotoIDs); err != nil {
 			dbError(w, err)
 			return
 		}

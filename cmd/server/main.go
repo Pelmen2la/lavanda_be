@@ -16,6 +16,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if len(os.Args) > 1 && os.Args[1] == "mail-check" {
+		if err = app.MailCheck(); err != nil {
+			log.Fatal(err)
+		}
+		log.Print("SMTP TLS, authentication, sender and recipient accepted. No email sent.")
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	a, err := app.Open(ctx, config)
@@ -54,7 +61,7 @@ func main() {
 		return
 	case "serve":
 	default:
-		log.Fatal("Usage: server [serve|migrate|admin|admin-reset-password|admin-set-login]")
+		log.Fatal("Usage: server [serve|migrate|admin|admin-reset-password|admin-set-login|mail-check]")
 	}
 	server := &http.Server{Addr: config.ListenAddr, Handler: a.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 25 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
