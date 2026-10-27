@@ -12,13 +12,18 @@ import (
 	"strconv"
 
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/image/draw"
 )
 
-const maxPhotoBytes = 5 << 20
+const maxPhotoBytes = 20 << 20
+const maxPhotoDimension = 1024
+
+// JSON transports the image as base64, which adds about one third to its size.
+const maxPhotoRequestBytes = ((maxPhotoBytes + 2) / 3 * 4) + 1024
 
 // Decode and re-encode uploads so metadata and trailing non-image content are discarded.
 func normalizePhoto(data []byte) ([]byte, string, error) {
-	invalid := errors.New("Выберите JPEG или PNG до 5 МБ и 20 мегапикселей")
+	invalid := errors.New("Выберите JPEG или PNG до 20 МБ и 20 мегапикселей")
 	if len(data) == 0 || len(data) > maxPhotoBytes {
 		return nil, "", invalid
 	}
@@ -29,6 +34,16 @@ func normalizePhoto(data []byte) ([]byte, string, error) {
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return nil, "", invalid
+	}
+
+	// Reduce only large images; keep aspect ratio and PNG transparency.
+	width, height := cfg.Width, cfg.Height
+	if longest := max(width, height); longest > maxPhotoDimension {
+		width = max(1, (width*maxPhotoDimension+longest/2)/longest)
+		height = max(1, (height*maxPhotoDimension+longest/2)/longest)
+		resized := image.NewNRGBA(image.Rect(0, 0, width, height))
+		draw.CatmullRom.Scale(resized, resized.Bounds(), img, img.Bounds(), draw.Src, nil)
+		img = resized
 	}
 	var out bytes.Buffer
 	if format == "jpeg" {
@@ -46,11 +61,11 @@ func (a *App) uploadPhoto(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Data []byte `json:"data"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 7<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, maxPhotoRequestBytes)
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
 	if err := d.Decode(&body); err != nil {
-		fail(w, 400, "Не удалось прочитать фото. Максимальный размер — 5 МБ.")
+		fail(w, 400, "Не удалось прочитать фото. Максимальный размер — 20 МБ.")
 		return
 	}
 	if err := d.Decode(&struct{}{}); err != io.EOF {

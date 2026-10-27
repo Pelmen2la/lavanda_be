@@ -129,3 +129,67 @@ func testPhotosIntegration(t *testing.T, request func(string, string, any, *http
 	check("GET", fmt.Sprintf("/api/admin/workplace-photos/%d", ids[1]), nil, admin, 404)
 	check("POST", path+"/photos", body, admin, 404)
 }
+
+func TestNormalizePhotoResize(t *testing.T) {
+	for _, format := range []string{"jpeg", "png"} {
+		for _, size := range []struct{ width, height, wantWidth, wantHeight int }{
+			{2048, 1536, 1024, 768}, {1536, 2048, 768, 1024},
+			{1500, 1500, 1024, 1024}, {1024, 768, 1024, 768},
+			{320, 240, 320, 240}, {1, 2048, 1, 1024},
+		} {
+			t.Run(fmt.Sprintf("%s_%dx%d", format, size.width, size.height), func(t *testing.T) {
+				source := image.NewNRGBA(image.Rect(0, 0, size.width, size.height))
+				var input bytes.Buffer
+				var err error
+				if format == "jpeg" {
+					err = jpeg.Encode(&input, source, nil)
+				} else {
+					err = png.Encode(&input, source)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				data, mime, err := normalizePhoto(input.Bytes())
+				if err != nil {
+					t.Fatal(err)
+				}
+				output, _, err := image.Decode(bytes.NewReader(data))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if output.Bounds().Dx() != size.wantWidth || output.Bounds().Dy() != size.wantHeight || mime != "image/"+format {
+					t.Fatalf("got %v (%s), want %dx%d (%s)", output.Bounds(), mime, size.wantWidth, size.wantHeight, format)
+				}
+				if format == "png" {
+					if _, _, _, alpha := output.At(0, 0).RGBA(); alpha != 0 {
+						t.Fatal("PNG transparency lost")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestNormalizePhotoTwentyMegabyteLimit(t *testing.T) {
+	// A valid image padded to the upload boundary also verifies that metadata/trailing
+	// bytes never end up in storage, even for files above the old 5 MB limit.
+	input := make([]byte, maxPhotoBytes)
+	copy(input, photoFixture(t, "jpeg"))
+	data, _, err := normalizePhoto(input)
+	if err != nil {
+		t.Fatal("20 MB image rejected:", err)
+	}
+	if len(data) >= 5<<20 {
+		t.Fatal("padding was retained")
+	}
+	if _, _, err = normalizePhoto(append(input, 0)); err == nil {
+		t.Fatal("over-limit image accepted")
+	}
+	body, err := json.Marshal(map[string]any{"data": input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) > maxPhotoRequestBytes {
+		t.Fatal("request limit rejects a valid 20 MB base64 upload")
+	}
+}
