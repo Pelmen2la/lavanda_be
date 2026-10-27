@@ -3,6 +3,7 @@ module lavanda
 go 1.26.0
 
 require (
+	github.com/disintegration/imaging v1.6.2
 	github.com/jackc/pgx/v5 v5.7.6
 	golang.org/x/crypto v0.46.0
 	golang.org/x/image v0.47.0

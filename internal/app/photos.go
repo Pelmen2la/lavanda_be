@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/disintegration/imaging"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/image/draw"
 )
@@ -31,13 +32,14 @@ func normalizePhoto(data []byte) ([]byte, string, error) {
 	if err != nil || (format != "jpeg" && format != "png") || cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > 20000000 {
 		return nil, "", invalid
 	}
-	img, _, err := image.Decode(bytes.NewReader(data))
+	// Apply EXIF rotation/reflection before stripping metadata and resizing.
+	img, err := imaging.Decode(bytes.NewReader(data), imaging.AutoOrientation(true))
 	if err != nil {
 		return nil, "", invalid
 	}
 
 	// Reduce only large images; keep aspect ratio and PNG transparency.
-	width, height := cfg.Width, cfg.Height
+	width, height := img.Bounds().Dx(), img.Bounds().Dy()
 	if longest := max(width, height); longest > maxPhotoDimension {
 		width = max(1, (width*maxPhotoDimension+longest/2)/longest)
 		height = max(1, (height*maxPhotoDimension+longest/2)/longest)

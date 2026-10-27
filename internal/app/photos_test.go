@@ -2,9 +2,11 @@ package app
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"image"
+	"image/color"
 	"image/jpeg"
 	"image/png"
 	"net/http"
@@ -191,5 +193,82 @@ func TestNormalizePhotoTwentyMegabyteLimit(t *testing.T) {
 	}
 	if len(body) > maxPhotoRequestBytes {
 		t.Fatal("request limit rejects a valid 20 MB base64 upload")
+	}
+}
+
+// Add a minimal JPEG APP1/EXIF orientation tag without changing the pixel data.
+func jpegWithOrientation(data []byte, orientation uint16) []byte {
+	exif := make([]byte, 32)
+	copy(exif, []byte("Exif\x00\x00II"))
+	binary.LittleEndian.PutUint16(exif[8:], 42)
+	binary.LittleEndian.PutUint32(exif[10:], 8)
+	binary.LittleEndian.PutUint16(exif[14:], 1)
+	binary.LittleEndian.PutUint16(exif[16:], 0x0112)
+	binary.LittleEndian.PutUint16(exif[18:], 3)
+	binary.LittleEndian.PutUint32(exif[20:], 1)
+	binary.LittleEndian.PutUint16(exif[24:], orientation)
+	result := append([]byte{}, data[:2]...)
+	result = append(result, 0xff, 0xe1, 0, byte(len(exif)+2))
+	result = append(result, exif...)
+	return append(result, data[2:]...)
+}
+
+func TestNormalizePhotoEXIFOrientation(t *testing.T) {
+	// Distinct quadrants verify actual pixel rotation/reflection, not just dimensions.
+	shades := []uint8{20, 80, 160, 240}
+	cases := []struct {
+		orientation uint16
+		corners     [4]int
+	}{
+		{1, [4]int{0, 1, 2, 3}}, {2, [4]int{1, 0, 3, 2}},
+		{3, [4]int{3, 2, 1, 0}}, {4, [4]int{2, 3, 0, 1}},
+		{5, [4]int{0, 2, 1, 3}}, {6, [4]int{2, 0, 3, 1}},
+		{7, [4]int{3, 1, 2, 0}}, {8, [4]int{1, 3, 0, 2}},
+	}
+	for _, size := range []image.Point{{120, 80}, {1600, 1200}} {
+		source := image.NewGray(image.Rect(0, 0, size.X, size.Y))
+		for y := 0; y < size.Y; y++ {
+			for x := 0; x < size.X; x++ {
+				source.SetGray(x, y, color.Gray{Y: shades[(y/(size.Y/2))*2+x/(size.X/2)]})
+			}
+		}
+		var input bytes.Buffer
+		if err := jpeg.Encode(&input, source, &jpeg.Options{Quality: 95}); err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range cases {
+			t.Run(fmt.Sprintf("%dx%d_orientation_%d", size.X, size.Y, tc.orientation), func(t *testing.T) {
+				data, _, err := normalizePhoto(jpegWithOrientation(input.Bytes(), tc.orientation))
+				if err != nil {
+					t.Fatal(err)
+				}
+				result, _, err := image.Decode(bytes.NewReader(data))
+				if err != nil {
+					t.Fatal(err)
+				}
+				width, height := size.X, size.Y
+				if width > 1024 {
+					height = height * 1024 / width
+					width = 1024
+				}
+				if tc.orientation >= 5 {
+					width, height = height, width
+				}
+				if result.Bounds().Dx() != width || result.Bounds().Dy() != height {
+					t.Fatalf("got %v, want %dx%d", result.Bounds(), width, height)
+				}
+				points := []image.Point{{width / 4, height / 4}, {width * 3 / 4, height / 4}, {width / 4, height * 3 / 4}, {width * 3 / 4, height * 3 / 4}}
+				for i, point := range points {
+					got := int(color.GrayModel.Convert(result.At(point.X, point.Y)).(color.Gray).Y)
+					want := int(shades[tc.corners[i]])
+					if got < want-5 || got > want+5 {
+						t.Fatalf("corner %d: got %d, want %d", i, got, want)
+					}
+				}
+				if bytes.Contains(data, []byte("Exif\x00\x00")) {
+					t.Fatal("EXIF retained after normalization")
+				}
+			})
+		}
 	}
 }
