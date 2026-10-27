@@ -55,8 +55,13 @@ func TestNormalizePhoto(t *testing.T) {
 	if err := png.Encode(&large, image.NewGray(image.Rect(0, 0, 5000, 4001))); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := normalizePhoto(large.Bytes()); err == nil {
-		t.Fatal("pixel limit not enforced")
+	data, _, err := normalizePhoto(large.Bytes())
+	if err != nil {
+		t.Fatal("image above 20 megapixels rejected:", err)
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || cfg.Width != 1920 || cfg.Height != 1536 {
+		t.Fatalf("large image was not resized proportionally: %v, err=%v", cfg, err)
 	}
 }
 
@@ -135,9 +140,9 @@ func testPhotosIntegration(t *testing.T, request func(string, string, any, *http
 func TestNormalizePhotoResize(t *testing.T) {
 	for _, format := range []string{"jpeg", "png"} {
 		for _, size := range []struct{ width, height, wantWidth, wantHeight int }{
-			{2048, 1536, 1024, 768}, {1536, 2048, 768, 1024},
-			{1500, 1500, 1024, 1024}, {1024, 768, 1024, 768},
-			{320, 240, 320, 240}, {1, 2048, 1, 1024},
+			{2048, 1536, 1920, 1440}, {1536, 2048, 1440, 1920},
+			{2400, 2400, 1920, 1920}, {1920, 1440, 1920, 1440}, {1500, 1500, 1500, 1500},
+			{320, 240, 320, 240}, {1, 2048, 1, 1920},
 		} {
 			t.Run(fmt.Sprintf("%s_%dx%d", format, size.width, size.height), func(t *testing.T) {
 				source := image.NewNRGBA(image.Rect(0, 0, size.width, size.height))
@@ -225,7 +230,7 @@ func TestNormalizePhotoEXIFOrientation(t *testing.T) {
 		{5, [4]int{0, 2, 1, 3}}, {6, [4]int{2, 0, 3, 1}},
 		{7, [4]int{3, 1, 2, 0}}, {8, [4]int{1, 3, 0, 2}},
 	}
-	for _, size := range []image.Point{{120, 80}, {1600, 1200}} {
+	for _, size := range []image.Point{{120, 80}, {2400, 1800}} {
 		source := image.NewGray(image.Rect(0, 0, size.X, size.Y))
 		for y := 0; y < size.Y; y++ {
 			for x := 0; x < size.X; x++ {
@@ -247,9 +252,9 @@ func TestNormalizePhotoEXIFOrientation(t *testing.T) {
 					t.Fatal(err)
 				}
 				width, height := size.X, size.Y
-				if width > 1024 {
-					height = height * 1024 / width
-					width = 1024
+				if width > 1920 {
+					height = height * 1920 / width
+					width = 1920
 				}
 				if tc.orientation >= 5 {
 					width, height = height, width

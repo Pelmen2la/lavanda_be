@@ -17,19 +17,19 @@ import (
 )
 
 const maxPhotoBytes = 20 << 20
-const maxPhotoDimension = 1024
+const maxPhotoDimension = 1920
 
 // JSON transports the image as base64, which adds about one third to its size.
 const maxPhotoRequestBytes = ((maxPhotoBytes + 2) / 3 * 4) + 1024
 
 // Decode and re-encode uploads so metadata and trailing non-image content are discarded.
 func normalizePhoto(data []byte) ([]byte, string, error) {
-	invalid := errors.New("Выберите JPEG или PNG до 20 МБ и 20 мегапикселей")
+	invalid := errors.New("Выберите JPEG или PNG до 20 МБ")
 	if len(data) == 0 || len(data) > maxPhotoBytes {
 		return nil, "", invalid
 	}
-	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
-	if err != nil || (format != "jpeg" && format != "png") || cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > 20000000 {
+	_, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || (format != "jpeg" && format != "png") {
 		return nil, "", invalid
 	}
 	// Apply EXIF rotation/reflection before stripping metadata and resizing.
