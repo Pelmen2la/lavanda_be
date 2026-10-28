@@ -235,6 +235,9 @@ func TestIntegration(t *testing.T) {
 	if account.ClientID != client.ID {
 		t.Fatal("invitation bound wrong client")
 	}
+	t.Run("admin edits registered client contacts", func(t *testing.T) {
+		testClientContactsIntegration(t, request, admin, user, client.ID)
+	})
 	t.Run("workplace photos", func(t *testing.T) { testPhotosIntegration(t, request, admin, user) })
 	place := request("POST", "/api/admin/workplaces", map[string]any{"name": "Test place", "description": "Description", "hourlyPrice": 100000, "active": true}, admin)
 	expect(place, 200)
