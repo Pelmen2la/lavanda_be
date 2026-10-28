@@ -213,6 +213,10 @@ CREATE INDEX IF NOT EXISTS workplace_photos_place_idx ON workplace_photos(workpl
 INSERT INTO schema_migrations(version) VALUES(13) ON CONFLICT DO NOTHING`); err != nil {
 		return err
 	}
+	if _, err = tx.Exec(ctx, `ALTER TABLE workplace_photos ADD COLUMN IF NOT EXISTS position integer NOT NULL DEFAULT 0;
+INSERT INTO schema_migrations(version) VALUES(14) ON CONFLICT DO NOTHING`); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 func hash(s string) string { v := sha256.Sum256([]byte(s)); return hex.EncodeToString(v[:]) }
@@ -339,6 +343,7 @@ func (a *App) Handler() http.Handler {
 	m.HandleFunc("GET /api/workplace-photos/{photoId}", a.photo)
 	m.HandleFunc("GET /api/admin/workplace-photos/{photoId}", a.protect(a.photo, true))
 	m.HandleFunc("POST /api/admin/workplaces/{id}/photos", a.protect(a.uploadPhoto, true))
+	m.HandleFunc("PUT /api/admin/workplaces/{id}/photos/order", a.protect(a.reorderPhotos, true))
 	m.HandleFunc("DELETE /api/admin/workplaces/{id}/photos/{photoId}", a.protect(a.deletePhoto, true))
 	m.HandleFunc("GET /api/availability", a.availability)
 	m.HandleFunc("POST /api/auth/login", a.rate(a.login))

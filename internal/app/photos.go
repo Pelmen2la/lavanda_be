@@ -100,7 +100,7 @@ func (a *App) uploadPhoto(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var id int64
-	if err = tx.QueryRow(r.Context(), "INSERT INTO workplace_photos(workplace_id,content_type,data) VALUES($1,$2,$3) RETURNING id", placeID, mime, data).Scan(&id); err != nil {
+	if err = tx.QueryRow(r.Context(), "INSERT INTO workplace_photos(workplace_id,content_type,data,position) SELECT $1,$2,$3,COALESCE(MAX(position),0)+1 FROM workplace_photos WHERE workplace_id=$1 RETURNING id", placeID, mime, data).Scan(&id); err != nil {
 		dbError(w, err)
 		return
 	}
@@ -109,6 +109,70 @@ func (a *App) uploadPhoto(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 201, map[string]int64{"id": id})
+}
+
+func (a *App) reorderPhotos(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		PhotoIDs []int64 `json:"photoIds"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	d := json.NewDecoder(r.Body)
+	d.DisallowUnknownFields()
+	if err := d.Decode(&body); err != nil || len(body.PhotoIDs) == 0 || len(body.PhotoIDs) > 10 {
+		fail(w, 400, "Некорректный порядок фотографий")
+		return
+	}
+	if err := d.Decode(&struct{}{}); err != io.EOF {
+		fail(w, 400, "Некорректные данные")
+		return
+	}
+	tx, err := a.DB.Begin(r.Context())
+	if err != nil {
+		dbError(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var placeID int64
+	if err = tx.QueryRow(r.Context(), "SELECT id FROM workplaces WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", r.PathValue("id")).Scan(&placeID); err != nil {
+		dbError(w, err)
+		return
+	}
+	rows, err := tx.Query(r.Context(), "SELECT id FROM workplace_photos WHERE workplace_id=$1 FOR UPDATE", placeID)
+	if err != nil {
+		dbError(w, err)
+		return
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		dbError(w, err)
+		return
+	}
+	remaining := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		remaining[id] = true
+	}
+	if len(ids) != len(body.PhotoIDs) {
+		fail(w, 409, "Список фотографий изменился. Откройте редактор заново.")
+		return
+	}
+	for _, id := range body.PhotoIDs {
+		if !remaining[id] {
+			fail(w, 400, "Некорректный порядок фотографий")
+			return
+		}
+		delete(remaining, id)
+	}
+	for position, id := range body.PhotoIDs {
+		if _, err = tx.Exec(r.Context(), "UPDATE workplace_photos SET position=$1 WHERE id=$2 AND workplace_id=$3", position, id, placeID); err != nil {
+			dbError(w, err)
+			return
+		}
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		dbError(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
 func (a *App) photo(w http.ResponseWriter, r *http.Request) {

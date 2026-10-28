@@ -116,6 +116,31 @@ func testPhotosIntegration(t *testing.T, request func(string, string, any, *http
 	if !found {
 		t.Fatal("place missing")
 	}
+	order := append([]int64(nil), ids...)
+	order[0], order[9] = order[9], order[0]
+	orderBody := map[string]any{"photoIds": order}
+	check("PUT", path+"/photos/order", orderBody, nil, 401)
+	check("PUT", path+"/photos/order", orderBody, user, 403)
+	check("PUT", "/api/admin/workplaces/0/photos/order", orderBody, admin, 404)
+	check("PUT", path+"/photos/order", map[string]any{"photoIds": ids[:9]}, admin, 409)
+	invalid := append([]int64(nil), ids...)
+	invalid[0] = ids[1]
+	check("PUT", path+"/photos/order", map[string]any{"photoIds": invalid}, admin, 400)
+	invalid[0] = -1
+	check("PUT", path+"/photos/order", map[string]any{"photoIds": invalid}, admin, 400)
+	check("PUT", path+"/photos/order", orderBody, admin, 200)
+	for _, endpoint := range []string{"/api/workplaces", "/api/admin/workplaces"} {
+		if err := json.Unmarshal(check("GET", endpoint, nil, admin, 200).Body.Bytes(), &places); err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range places {
+			if p.ID == place.ID {
+				if fmt.Sprint(p.PhotoIDs) != fmt.Sprint(order) {
+					t.Fatalf("order not persisted: %v", p.PhotoIDs)
+				}
+			}
+		}
+	}
 	photoPath := fmt.Sprintf("/api/workplace-photos/%d", ids[0])
 	photo := check("GET", photoPath, nil, nil, 200)
 	if photo.Header().Get("Content-Type") != "image/jpeg" {
@@ -131,7 +156,21 @@ func testPhotosIntegration(t *testing.T, request func(string, string, any, *http
 	check("DELETE", fmt.Sprintf("/api/admin/workplaces/0/photos/%d", ids[0]), nil, admin, 404)
 	check("DELETE", fmt.Sprintf("%s/photos/%d", path, ids[0]), nil, admin, 200)
 	check("GET", fmt.Sprintf("/api/admin/workplace-photos/%d", ids[0]), nil, admin, 404)
-	check("POST", path+"/photos", body, admin, 201)
+	added := check("POST", path+"/photos", body, admin, 201)
+	var addedPhoto struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(added.Body.Bytes(), &addedPhoto); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(check("GET", "/api/admin/workplaces", nil, admin, 200).Body.Bytes(), &places); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range places {
+		if p.ID == place.ID && (len(p.PhotoIDs) != 10 || p.PhotoIDs[0] != order[0] || p.PhotoIDs[9] != addedPhoto.ID) {
+			t.Fatal("upload did not preserve order")
+		}
+	}
 	check("DELETE", path, nil, admin, 200)
 	check("GET", fmt.Sprintf("/api/admin/workplace-photos/%d", ids[1]), nil, admin, 404)
 	check("POST", path+"/photos", body, admin, 404)
