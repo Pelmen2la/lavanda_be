@@ -667,6 +667,9 @@ func TestIntegration(t *testing.T) {
 			t.Fatal("admin cannot read booking comment")
 		}
 	}
+	t.Run("admin edits booking comments", func(t *testing.T) {
+		testBookingCommentsIntegration(t, request, admin, user, masterCookie, bookingID, start)
+	})
 	expect(request("GET", "/api/admin/bookings?from=2026-10-20&to=2026-10-19", nil, admin), 400)
 	expect(request("GET", "/api/admin/bookings?from=invalid&to=2026-10-19", nil, admin), 400)
 	expect(request("GET", rangePath, nil, user), 403)
@@ -714,6 +717,13 @@ func TestIntegration(t *testing.T) {
 	batchStart := start.Add(6 * time.Hour)
 	expect(request("POST", "/api/bookings", map[string]any{"workplaceId": batchPlaces[1], "clientId": client.ID, "start": batchStart, "end": batchStart.Add(time.Hour)}, admin), 201)
 	batchBody := map[string]any{"workplaceIds": batchPlaces, "clientId": client.ID, "start": batchStart, "end": batchStart.Add(time.Hour)}
+	batchBody["respectBusy"] = true
+	blockedBatch := request("POST", "/api/bookings", batchBody, admin)
+	expect(blockedBatch, 409)
+	if strings.Contains(blockedBatch.Body.String(), `"conflicts"`) {
+		t.Fatal("availability-checked booking must not offer priority replacement")
+	}
+	delete(batchBody, "respectBusy")
 	expect(request("POST", "/api/bookings", batchBody, admin), 409)
 	var count int
 	if err := db.QueryRow(ctx, "SELECT count(*) FROM bookings WHERE workplace_id=$1", batchPlaces[0]).Scan(&count); err != nil || count != 0 {
@@ -762,6 +772,13 @@ func TestIntegration(t *testing.T) {
 		t.Fatal("failed replacement cancelled existing bookings", err)
 	}
 	batchBody["clientId"] = client.ID
+	// Even a full list of confirmed conflicts cannot override respectBusy.
+	batchBody["respectBusy"] = true
+	expect(request("POST", "/api/bookings", batchBody, admin), 409)
+	if err := db.QueryRow(ctx, "SELECT count(*) FROM bookings WHERE id=ANY($1) AND cancelled_at IS NULL", batch.IDs).Scan(&count); err != nil || count != 2 {
+		t.Fatal("availability-checked booking cancelled existing records", err)
+	}
+	delete(batchBody, "respectBusy")
 	expect(request("POST", "/api/bookings", batchBody, admin), 201)
 	if err := db.QueryRow(ctx, "SELECT count(*) FROM bookings WHERE id=ANY($1) AND cancelled_at IS NOT NULL AND cancelled_by=$2", batch.IDs, adminUser.ID).Scan(&count); err != nil || count != 2 {
 		t.Fatal("priority booking did not cancel conflicts", err)

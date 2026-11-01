@@ -5,7 +5,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 type Busy struct {
@@ -144,6 +143,7 @@ func (a *App) createBooking(w http.ResponseWriter, r *http.Request) {
 		WorkplaceID          int64     `json:"workplaceId"`
 		WorkplaceIDs         []int64   `json:"workplaceIds"`
 		ConfirmedConflictIDs []int64   `json:"confirmedConflictIds"`
+		RespectBusy          bool      `json:"respectBusy"`
 		ClientID             int64     `json:"clientId"`
 		MasterID             int64     `json:"masterId"`
 		Start                time.Time `json:"start"`
@@ -153,15 +153,12 @@ func (a *App) createBooking(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &body) {
 		return
 	}
-	body.Comment = strings.TrimSpace(body.Comment)
-	if utf8.RuneCountInString(body.Comment) > 2000 {
-		fail(w, 400, "Комментарий должен содержать не более 2000 символов")
+	comment, err := normalizeBookingComment(body.Comment)
+	if err != nil {
+		fail(w, 400, err.Error())
 		return
 	}
-	if strings.ContainsRune(body.Comment, '\x00') {
-		fail(w, 400, "Комментарий содержит недопустимый символ")
-		return
-	}
+	body.Comment = comment
 	if body.WorkplaceIDs != nil && body.WorkplaceID != 0 {
 		fail(w, 400, "Передайте место или список мест, не оба поля сразу")
 		return
@@ -260,7 +257,7 @@ func (a *App) createBooking(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	cancelledIDs := []int64{}
-	if u.Role == "admin" {
+	if u.Role == "admin" && !body.RespectBusy {
 		rows, err := tx.Query(r.Context(), `SELECT b.id,b.workplace_id,p.name,c.name,b.starts_at,b.ends_at FROM bookings b JOIN workplaces p ON p.id=b.workplace_id JOIN clients c ON c.id=b.client_id WHERE EXISTS(SELECT 1 FROM booking_resources br JOIN workplace_resources wr ON wr.resource_id=br.resource_id WHERE br.booking_id=b.id AND wr.workplace_id=ANY($1)) AND b.cancelled_at IS NULL AND b.starts_at<$3 AND b.ends_at>$2 ORDER BY b.id FOR UPDATE OF b`, body.WorkplaceIDs, body.Start, body.End)
 		if err != nil {
 			dbError(w, err)

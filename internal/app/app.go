@@ -368,6 +368,7 @@ func (a *App) Handler() http.Handler {
 	m.HandleFunc("PUT /api/admin/workplaces/{id}", a.protect(a.saveWorkplace, true))
 	m.HandleFunc("DELETE /api/admin/workplaces/{id}", a.protect(a.deleteWorkplace, true))
 	m.HandleFunc("GET /api/admin/bookings", a.protect(a.bookings, true))
+	m.HandleFunc("PUT /api/admin/bookings/{id}/comment", a.protect(a.updateBookingComment, true))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
