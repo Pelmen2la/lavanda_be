@@ -323,8 +323,8 @@ func (a *App) createBooking(w http.ResponseWriter, r *http.Request) {
 		dbError(w, err)
 		return
 	}
-	a.notifyBooking("Новая бронь", ids...)
-	a.notifyBooking("Бронь отменена администратором из-за приоритетной записи", cancelledIDs...)
+	a.notifyBooking("Новая бронь", u, ids...)
+	a.notifyBooking("Бронь отменена администратором из-за приоритетной записи", u, cancelledIDs...)
 	writeJSON(w, 201, map[string]any{"id": ids[0], "ids": ids})
 }
 func (a *App) cancelBooking(w http.ResponseWriter, r *http.Request) {
@@ -339,6 +339,6 @@ func (a *App) cancelBooking(w http.ResponseWriter, r *http.Request) {
 		dbError(w, err)
 		return
 	}
-	a.notifyBooking("Бронь отменена", id)
+	a.notifyBooking("Бронь отменена", u, id)
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }

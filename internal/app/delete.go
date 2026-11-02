@@ -95,6 +95,6 @@ func (a *App) deleteCard(w http.ResponseWriter, r *http.Request, client bool) {
 		dbError(w, err)
 		return
 	}
-	a.notifyBooking("Бронь отменена при удалении карточки", cancelled...)
+	a.notifyBooking("Бронь отменена при удалении карточки", current(r), cancelled...)
 	writeJSON(w, 200, map[string]any{"ok": true, "cancelledCount": len(cancelled)})
 }

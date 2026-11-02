@@ -521,6 +521,12 @@ func TestIntegration(t *testing.T) {
 			}
 			return email{}
 		}
+		checkActor := func(m email, role, login string) {
+			t.Helper()
+			if !strings.Contains(m.body, "<strong>Действие выполнил: "+role+"</strong>") || !strings.Contains(m.body, "Логин: <strong>"+login+"</strong>") {
+				t.Fatalf("incorrect action initiator in notification: %s", m.body)
+			}
+		}
 		createdPlace := check("POST", "/api/admin/workplaces", map[string]any{"name": "Notification place", "hourlyPrice": 10000, "active": true}, admin, 200)
 		var otherPlace struct {
 			ID int64 `json:"id"`
@@ -550,6 +556,7 @@ func TestIntegration(t *testing.T) {
 			t.Fatal("batch comment was not copied to all places", err)
 		}
 		m := receive()
+		checkActor(m, "Клиент", "+79991234567")
 		if !strings.Contains(m.subject, "Новая бронь") || !strings.Contains(m.body, "Notification place") {
 			t.Fatal("incorrect booking email")
 		}
@@ -567,15 +574,42 @@ func TestIntegration(t *testing.T) {
 		if err := json.Unmarshal(replaced.Body.Bytes(), &batch); err != nil {
 			t.Fatal(err)
 		}
-		events := []string{receive().subject, receive().subject}
+		creation, cancellation := receive(), receive()
+		checkActor(creation, "Администратор", "lavanda.admin")
+		checkActor(cancellation, "Администратор", "lavanda.admin")
+		events := []string{creation.subject, cancellation.subject}
 		if !strings.Contains(strings.Join(events, "|"), "Новая бронь") || !strings.Contains(strings.Join(events, "|"), "приоритетной записи") {
 			t.Fatal("missing priority notifications", events)
 		}
+		// A phone-less account uses email as its login. Restore the phone before
+		// reading the background email to verify the request's actor is retained.
+		var previousPhone string
+		if err := db.QueryRow(ctx, "SELECT phone FROM clients WHERE id=$1", client.ID).Scan(&previousPhone); err != nil {
+			t.Fatal(err)
+		}
+		defer db.Exec(ctx, "UPDATE clients SET phone=$1 WHERE id=$2", previousPhone, client.ID)
+		if _, err := db.Exec(ctx, "UPDATE clients SET phone='' WHERE id=$1", client.ID); err != nil {
+			t.Fatal(err)
+		}
+		emailLoginBooking := check("POST", "/api/bookings", map[string]any{"workplaceId": p.ID, "start": notificationStart.Add(2 * time.Hour), "end": notificationStart.Add(3 * time.Hour), "comment": "Общий комментарий к местам"}, user, 201)
+		var emailLoginRecord struct{ ID int64 }
+		if err := json.Unmarshal(emailLoginBooking.Body.Bytes(), &emailLoginRecord); err != nil {
+			t.Fatal(err)
+		}
+		defer db.Exec(ctx, "DELETE FROM bookings WHERE id=$1", emailLoginRecord.ID)
+		if _, err := db.Exec(ctx, "UPDATE clients SET phone=$1 WHERE id=$2", previousPhone, client.ID); err != nil {
+			t.Fatal(err)
+		}
+		checkActor(receive(), "Клиент", "client@example.test")
+		check("POST", fmt.Sprintf("/api/bookings/%d/cancel", emailLoginRecord.ID), map[string]any{}, admin, 200)
+		checkActor(receive(), "Администратор", "lavanda.admin")
 		// SMTP failure must not roll back a user's cancellation.
 		failDelivery.Store(true)
 		cancelPath := fmt.Sprintf("/api/bookings/%d/cancel", batch.IDs[0])
 		check("POST", cancelPath, map[string]any{}, user, 200)
-		if m := receive(); !strings.Contains(m.subject, "Бронь отменена") {
+		cancelledEmail := receive()
+		checkActor(cancelledEmail, "Клиент", "+79991234567")
+		if !strings.Contains(cancelledEmail.subject, "Бронь отменена") {
 			t.Fatal("missing cancellation notification")
 		}
 		var cancelled bool
@@ -584,7 +618,9 @@ func TestIntegration(t *testing.T) {
 		}
 		check("POST", cancelPath, map[string]any{}, user, 404)
 		check("DELETE", fmt.Sprintf("/api/admin/workplaces/%d", otherPlace.ID), nil, admin, 200)
-		if m := receive(); !strings.Contains(m.subject, "при удалении карточки") {
+		deletedEmail := receive()
+		checkActor(deletedEmail, "Администратор", "lavanda.admin")
+		if !strings.Contains(deletedEmail.subject, "при удалении карточки") {
 			t.Fatal("missing deletion cancellation notification")
 		}
 		if len(messages) != 0 {

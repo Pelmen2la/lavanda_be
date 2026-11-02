@@ -47,6 +47,7 @@ type User struct {
 	Name     string `json:"name"`
 	Email    string `json:"email"`
 	Role     string `json:"role"`
+	Login    string `json:"-"`
 }
 type userKey struct{}
 
@@ -289,7 +290,7 @@ func (a *App) protect(next http.HandlerFunc, admin bool) http.HandlerFunc {
 			return
 		}
 		var u User
-		err = a.DB.QueryRow(r.Context(), `SELECT a.id,c.id,c.name,c.email,a.role FROM sessions s JOIN accounts a ON a.id=s.account_id JOIN clients c ON c.id=a.client_id WHERE s.token_hash=$1 AND s.expires_at>now() AND c.deleted_at IS NULL`, hash(c.Value)).Scan(&u.ID, &u.ClientID, &u.Name, &u.Email, &u.Role)
+		err = a.DB.QueryRow(r.Context(), `SELECT a.id,c.id,c.name,c.email,a.role,COALESCE(NULLIF(a.admin_login,''),NULLIF(c.phone,''),c.email) FROM sessions s JOIN accounts a ON a.id=s.account_id JOIN clients c ON c.id=a.client_id WHERE s.token_hash=$1 AND s.expires_at>now() AND c.deleted_at IS NULL`, hash(c.Value)).Scan(&u.ID, &u.ClientID, &u.Name, &u.Email, &u.Role, &u.Login)
 		if errors.Is(err, pgx.ErrNoRows) {
 			fail(w, 401, "Войдите в аккаунт")
 			return

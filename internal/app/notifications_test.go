@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -109,9 +110,37 @@ func TestBookingNotificationsDisabled(t *testing.T) {
 	t.Setenv("TELEGRAM_CHAT_ID", "")
 	a := &App{mailSender: func(string, string, string) error { t.Error("disabled notification attempted email"); return nil }}
 	// No database is needed when notifications are disabled or there are no events.
-	a.notifyBooking("Новая бронь", 1)
+	a.notifyBooking("Новая бронь", User{}, 1)
 	t.Setenv("ADMIN_NOTIFICATION_EMAIL", "notifications@example.test")
-	a.notifyBooking("Бронь отменена")
+	a.notifyBooking("Бронь отменена", User{})
+}
+
+func TestBookingEmailActor(t *testing.T) {
+	for _, tc := range []struct {
+		actor       User
+		role, login string
+	}{
+		{User{ID: 1, Role: "admin", Login: "lavanda.admin"}, "Администратор", "lavanda.admin"},
+		{User{ID: 2, Role: "client", Login: "+79991234567"}, "Клиент", "+79991234567"},
+		{User{ID: 3, Role: "master", Login: "master@example.test"}, "Мастер", "master@example.test"},
+		{User{ID: 4, Role: "client"}, "Клиент", "аккаунт №4"},
+	} {
+		body := bookingEmailActor(tc.actor)
+		if !strings.Contains(body, "<strong>Действие выполнил: "+tc.role+"</strong>") || !strings.Contains(body, "Логин: <strong>"+tc.login+"</strong>") {
+			t.Fatal("missing actor role or login", body)
+		}
+	}
+	body := bookingEmailActor(User{Role: "client", Login: `user<script>&"`, Name: `Анна <script>&"`})
+	if strings.Contains(body, "<script>") || !strings.Contains(body, "user&lt;script&gt;&amp;&#34;") || !strings.Contains(body, "Анна &lt;script&gt;&amp;&#34;") {
+		t.Fatal("actor identity was not HTML-escaped", body)
+	}
+}
+
+func TestNotificationLoginIsNotExposedInUserJSON(t *testing.T) {
+	data, err := json.Marshal(User{ID: 1, Login: "private-login"})
+	if err != nil || strings.Contains(string(data), "private-login") || strings.Contains(string(data), `"login"`) {
+		t.Fatal("notification-only login leaked into user response", err)
+	}
 }
 
 func TestBookingEmailSubject(t *testing.T) {

@@ -126,7 +126,7 @@ func newSMTPClient(conn net.Conn, port string, config *tls.Config) (*smtp.Client
 	return c, nil
 }
 
-func (a *App) notifyBooking(event string, ids ...int64) {
+func (a *App) notifyBooking(event string, actor User, ids ...int64) {
 	bot, chat := os.Getenv("TELEGRAM_BOT_TOKEN"), os.Getenv("TELEGRAM_CHAT_ID")
 	email := strings.TrimSpace(os.Getenv("ADMIN_NOTIFICATION_EMAIL"))
 	telegram := bot != "" && chat != ""
@@ -181,7 +181,7 @@ func (a *App) notifyBooking(event string, ids ...int64) {
 			if len(clients) > 1 {
 				firstName += " и другие клиенты"
 			}
-			body := "<!doctype html><html lang=\"ru\"><body><h2>" + html.EscapeString(event) + "</h2>" + strings.Join(htmlDetails, "\n") + "<p><a href=\"" + html.EscapeString(a.Config.PublicURL+"/admin/bookings/") + "\">Открыть записи</a></p></body></html>"
+			body := "<!doctype html><html lang=\"ru\"><body><h2>" + html.EscapeString(event) + "</h2>" + bookingEmailActor(actor) + strings.Join(htmlDetails, "\n") + "<p><a href=\"" + html.EscapeString(a.Config.PublicURL+"/admin/bookings/") + "\">Открыть записи</a></p></body></html>"
 			if err := sender(email, bookingEmailSubject(event, firstID, firstStart, len(details), firstName), strings.ReplaceAll(body, "\n", "\r\n")); err != nil {
 				log.Printf("admin booking email delivery failed: %v", err)
 			}
@@ -192,6 +192,23 @@ func (a *App) notifyBooking(event string, ids ...int64) {
 			}
 		}
 	})
+}
+
+func bookingEmailActor(actor User) string {
+	role := "Пользователь"
+	switch actor.Role {
+	case "admin":
+		role = "Администратор"
+	case "client":
+		role = "Клиент"
+	case "master":
+		role = "Мастер"
+	}
+	login := actor.Login
+	if login == "" {
+		login = fmt.Sprintf("аккаунт №%d", actor.ID)
+	}
+	return "<p><strong>Действие выполнил: " + role + "</strong><br>Логин: <strong>" + html.EscapeString(login) + "</strong><br>Имя: " + html.EscapeString(actor.Name) + "</p>"
 }
 
 func bookingEmailSubject(event string, id int64, start time.Time, count int, clientName string) string {
